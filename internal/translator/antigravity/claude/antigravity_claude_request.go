@@ -67,6 +67,27 @@ func hasResolvedThinkingSignature(modelName, signature string) bool {
 	return signature != ""
 }
 
+func extractClaudeCacheControl(contentResult gjson.Result) gjson.Result {
+	if cacheControl := contentResult.Get("cache_control"); cacheControl.Exists() {
+		return cacheControl
+	}
+	thinkingBlock := contentResult.Get("thinking")
+	if thinkingBlock.Exists() && thinkingBlock.IsObject() {
+		if cacheControl := thinkingBlock.Get("cache_control"); cacheControl.Exists() {
+			return cacheControl
+		}
+	}
+	return gjson.Result{}
+}
+
+func setPartCacheControl(partJSON []byte, contentResult gjson.Result) []byte {
+	cacheControl := extractClaudeCacheControl(contentResult)
+	if cacheControl.Exists() && cacheControl.Raw != "" {
+		partJSON, _ = sjson.SetRawBytes(partJSON, "cache_control", []byte(cacheControl.Raw))
+	}
+	return partJSON
+}
+
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini CLI API.
@@ -105,6 +126,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				if systemPrompt != "" {
 					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
 				}
+				partJSON = setPartCacheControl(partJSON, systemPromptResult)
 				systemInstructionJSON, _ = sjson.SetRawBytes(systemInstructionJSON, "parts.-1", partJSON)
 				hasSystemInstruction = true
 			}
@@ -185,6 +207,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if signature != "" {
 							partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
 						}
+						partJSON = setPartCacheControl(partJSON, contentResult)
 						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
@@ -195,12 +218,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						partJSON := []byte(`{}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", prompt)
+						partJSON = setPartCacheControl(partJSON, contentResult)
 						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						// NOTE: Do NOT inject dummy thinking blocks here.
 						// Antigravity API validates signatures, so dummy values are rejected.
 
-						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
+						functionName := util.AntigravityToolName(contentResult.Get("name").String())
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 
@@ -262,7 +286,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 							functionResponseJSON := []byte(`{}`)
 							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "id", toolCallID)
-							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "name", util.SanitizeFunctionName(funcName))
+							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "name", util.AntigravityToolName(funcName))
 
 							responseData := ""
 							if functionResponseResult.Type == gjson.String {
@@ -427,7 +451,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tools
 	var toolsJSON []byte
 	toolDeclCount := 0
-	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
+	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema", "cache_control"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
 		toolsJSON = []byte(`[{"functionDeclarations":[]}]`)
@@ -440,7 +464,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
 				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
 				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
-				tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(gjson.GetBytes(tool, "name").String()))
+				tool, _ = sjson.SetBytes(tool, "name", util.AntigravityToolName(gjson.GetBytes(tool, "name").String()))
 				for toolKey := range gjson.ParseBytes(tool).Map() {
 					if util.InArray(allowedToolKeys, toolKey) {
 						continue
@@ -514,7 +538,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		case "tool":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
-				out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
+				out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.AntigravityToolName(toolChoiceName)})
 			}
 		}
 	}

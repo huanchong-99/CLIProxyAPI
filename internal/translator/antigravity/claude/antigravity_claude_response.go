@@ -103,7 +103,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
-			ToolNameMap:      util.SanitizedToolNameMap(originalRequestRawJSON),
+			ToolNameMap:      util.AntigravityToolNameMap(originalRequestRawJSON),
 		}
 	}
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
@@ -289,7 +289,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				// This creates the structure for a function call in Claude Code format
 				// Create the tool use block with unique ID and function details
 				data := []byte(fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, params.ResponseIndex))
-				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))))
+				toolUseID := functionCallResult.Get("id").String()
+				if toolUseID == "" {
+					toolUseID = fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))
+				}
+				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(toolUseID))
 				data, _ = sjson.SetBytes(data, "content_block.name", fcName)
 				appendEvent("content_block_start", string(data))
 
@@ -398,7 +402,7 @@ func resolveStopReason(params *Params) string {
 // Returns:
 //   - []byte: A Claude-compatible JSON response.
 func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	toolNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	toolNameMap := util.AntigravityToolNameMap(originalRequestRawJSON)
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	root := gjson.ParseBytes(rawJSON)
@@ -502,9 +506,13 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				hasToolCall = true
 
 				name := util.RestoreSanitizedToolName(toolNameMap, functionCall.Get("name").String())
-				toolIDCounter++
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolBlock, _ = sjson.SetBytes(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
+				toolID := functionCall.Get("id").String()
+				if toolID == "" {
+					toolIDCounter++
+					toolID = fmt.Sprintf("tool_%d", toolIDCounter)
+				}
+				toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(toolID))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", name)
 
 				if args := functionCall.Get("args"); args.Exists() && args.Raw != "" && gjson.Valid(args.Raw) && args.IsObject() {

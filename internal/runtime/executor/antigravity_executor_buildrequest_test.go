@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -88,6 +89,122 @@ func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithEmptyToolsArray(t *t
 	}`))
 
 	assertNonSchemaRequestPreserved(t, body)
+}
+
+func TestAntigravityBuildRequest_PreservesCacheControlAndAliasedToolNames(t *testing.T) {
+	aliasName := "ag_browser_subagent__0123456789abcdef"
+	body := buildRequestBodyFromRawPayload(t, "claude-opus-4-6", []byte(`{
+		"request": {
+			"systemInstruction": {
+				"parts": [
+					{"text": "system", "cache_control": {"type": "ephemeral"}}
+				]
+			},
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"text": "hello", "cache_control": {"type": "ephemeral"}}
+					]
+				}
+			],
+			"tools": [
+				{
+					"function_declarations": [
+						{
+							"name": "`+aliasName+`",
+							"cache_control": {"type": "ephemeral"},
+							"parametersJsonSchema": {
+								"type": "object",
+								"properties": {"url": {"type": "string"}}
+							}
+						}
+					]
+				}
+			],
+			"toolConfig": {
+				"functionCallingConfig": {
+					"mode": "ANY",
+					"allowedFunctionNames": ["`+aliasName+`"]
+				}
+			}
+		}
+	}`))
+
+	decl := extractFirstFunctionDeclaration(t, body)
+	if got, _ := decl["name"].(string); got != aliasName {
+		t.Fatalf("aliased tool name should be preserved, got %v", decl["name"])
+	}
+	cacheControl, ok := decl["cache_control"].(map[string]any)
+	if !ok || cacheControl["type"] != "ephemeral" {
+		t.Fatalf("tool declaration cache_control should be preserved, got %v", decl["cache_control"])
+	}
+
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid type")
+	}
+	systemInstruction, ok := request["systemInstruction"].(map[string]any)
+	if !ok {
+		t.Fatalf("systemInstruction missing or invalid type")
+	}
+	systemParts, ok := systemInstruction["parts"].([]any)
+	if !ok || len(systemParts) != 1 {
+		t.Fatalf("systemInstruction.parts missing or invalid type")
+	}
+	systemPart, ok := systemParts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("system part missing or invalid type")
+	}
+	systemCacheControl, ok := systemPart["cache_control"].(map[string]any)
+	if !ok || systemCacheControl["type"] != "ephemeral" {
+		t.Fatalf("system cache_control should be preserved, got %v", systemPart["cache_control"])
+	}
+
+	contents, ok := request["contents"].([]any)
+	if !ok || len(contents) != 1 {
+		t.Fatalf("contents missing or invalid type")
+	}
+	content, ok := contents[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content missing or invalid type")
+	}
+	parts, ok := content["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("content parts missing or invalid type")
+	}
+	contentPart, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content part missing or invalid type")
+	}
+	contentCacheControl, ok := contentPart["cache_control"].(map[string]any)
+	if !ok || contentCacheControl["type"] != "ephemeral" {
+		t.Fatalf("content cache_control should be preserved, got %v", contentPart["cache_control"])
+	}
+
+	toolConfig, ok := request["toolConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("toolConfig missing or invalid type")
+	}
+	functionCallingConfig, ok := toolConfig["functionCallingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("functionCallingConfig missing or invalid type")
+	}
+	allowedFunctionNames, ok := functionCallingConfig["allowedFunctionNames"].([]any)
+	if !ok || len(allowedFunctionNames) != 1 || allowedFunctionNames[0] != aliasName {
+		t.Fatalf("allowedFunctionNames should be preserved, got %v", functionCallingConfig["allowedFunctionNames"])
+	}
+}
+
+func TestAntigravityConvertStreamToNonStream_PreservesFunctionCallID(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	stream := []byte(`{"response":{"responseId":"resp_1","modelVersion":"claude-sonnet-4-6","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_123","name":"ag_tool__0123456789abcdef","args":{"path":"."}}}]}}]}}`)
+
+	output := executor.convertStreamToNonStream(append(stream, '\n'))
+
+	if got := gjson.GetBytes(output, "response.candidates.0.content.parts.0.functionCall.id").String(); got != "call_123" {
+		t.Fatalf("functionCall.id should survive stream-to-nonstream conversion, got %q", got)
+	}
 }
 
 func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {

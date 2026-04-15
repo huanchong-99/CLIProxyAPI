@@ -2436,3 +2436,160 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_PreservesCacheControlAndAliasesOpaqueToolNames(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	toolPrefix := "mcp__filesystem__read_file__" + strings.Repeat("a", 80)
+	toolA := toolPrefix + "alpha"
+	toolB := toolPrefix + "beta"
+	validSignature := testAnthropicNativeSignature(t)
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"system": [
+			{"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}
+		],
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "thinking",
+						"thinking": {"thinking": "tool planning", "cache_control": {"type": "ephemeral"}},
+						"signature": "` + validSignature + `"
+					},
+					{
+						"type": "tool_use",
+						"id": "call_1",
+						"name": "` + toolA + `",
+						"input": {"path": "."}
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"name": "` + toolA + `",
+				"description": "read file",
+				"cache_control": {"type": "ephemeral"},
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			},
+			{
+				"name": "` + toolB + `",
+				"description": "read file later",
+				"cache_control": {"type": "ephemeral"},
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			}
+		],
+		"tool_choice": {"type": "tool", "name": "` + toolB + `"}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+	if !gjson.ValidBytes(output) {
+		t.Fatalf("output is not valid JSON: %s", string(output))
+	}
+
+	if got := gjson.GetBytes(output, "request.systemInstruction.parts.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control should be preserved, got %q", got)
+	}
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("text cache_control should be preserved, got %q", got)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("thinking cache_control should be preserved, got %q", got)
+	}
+
+	decls := gjson.GetBytes(output, "request.tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("expected 2 function declarations, got %d", len(decls))
+	}
+	nameA := decls[0].Get("name").String()
+	nameB := decls[1].Get("name").String()
+	if nameA == nameB {
+		t.Fatalf("opaque tool aliases must be collision-free, both mapped to %q", nameA)
+	}
+	for _, name := range []string{nameA, nameB} {
+		if len(name) > 64 {
+			t.Fatalf("aliased tool name must stay within 64 chars, got %d for %q", len(name), name)
+		}
+		if !strings.HasPrefix(name, "ag_") {
+			t.Fatalf("long opaque tool name should use Antigravity alias, got %q", name)
+		}
+	}
+	if got := decls[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool declaration cache_control should be preserved, got %q", got)
+	}
+	if got := decls[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool declaration cache_control should be preserved, got %q", got)
+	}
+
+	if got := gjson.GetBytes(output, "request.contents.1.parts.1.functionCall.name").String(); got != nameA {
+		t.Fatalf("tool_use should use the same alias as the declaration, got %q want %q", got, nameA)
+	}
+
+	allowed := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+	if len(allowed) != 1 || allowed[0].String() != nameB {
+		t.Fatalf("tool_choice should resolve to the aliased tool name, got %s", gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolResultUsesAliasedOpaqueToolNameBackfill(t *testing.T) {
+	toolName := "browser_subagent__" + strings.Repeat("navigate__", 10) + "capture_screenshot"
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "call_opaque_1",
+						"name": "` + toolName + `",
+						"input": {"url": "https://example.com"}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_opaque_1",
+						"content": {"ok": true}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+	if !gjson.ValidBytes(output) {
+		t.Fatalf("output is not valid JSON: %s", string(output))
+	}
+
+	functionCallName := gjson.GetBytes(output, "request.contents.0.parts.0.functionCall.name").String()
+	functionResponseName := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.name").String()
+	if functionCallName == "" {
+		t.Fatal("functionCall.name should be populated")
+	}
+	if functionCallName != functionResponseName {
+		t.Fatalf("tool_result should backfill the same aliased name, call=%q response=%q", functionCallName, functionResponseName)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.id").String(); got != "call_opaque_1" {
+		t.Fatalf("tool_result should preserve tool id, got %q", got)
+	}
+}

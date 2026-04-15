@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/tidwall/gjson"
 )
 
 // ============================================================================
@@ -345,5 +346,99 @@ func TestConvertAntigravityResponseToClaude_SignatureOnlyChunk(t *testing.T) {
 	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "Full thinking text.")
 	if cachedSig != validSignature {
 		t.Errorf("Signature-only chunk should still cache correctly, got %q", cachedSig)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_UsesUpstreamFunctionCallIDAndRestoresOpaqueToolName(t *testing.T) {
+	toolName := "mcp__filesystem__read_file__" + strings.Repeat("deep__", 10) + "payload"
+	originalRequest := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"tools": [
+			{
+				"name": "` + toolName + `",
+				"description": "read file",
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			}
+		],
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "read it"}]}]
+	}`)
+	requestJSON := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", originalRequest, false)
+	aliasedName := gjson.GetBytes(requestJSON, "request.tools.0.functionDeclarations.0.name").String()
+	if aliasedName == "" {
+		t.Fatal("expected translated request to contain a tool alias")
+	}
+
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{
+						"functionCall": {
+							"id": "call_123",
+							"name": "` + aliasedName + `",
+							"args": {"path": "."}
+						}
+					}]
+				}
+			}]
+		}
+	}`)
+
+	var param any
+	output := ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", originalRequest, requestJSON, responseJSON, &param)
+	all := string(bytes.Join(output, nil))
+
+	if !strings.Contains(all, `"id":"call_123"`) {
+		t.Fatalf("stream output should reuse upstream functionCall.id, got %s", all)
+	}
+	if !strings.Contains(all, `"name":"`+toolName+`"`) {
+		t.Fatalf("stream output should restore the original opaque tool name, got %s", all)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_UsesUpstreamFunctionCallIDAndRestoresOpaqueToolName(t *testing.T) {
+	toolName := "browser_subagent__" + strings.Repeat("history__", 10) + "snapshot"
+	originalRequest := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"tools": [
+			{
+				"name": "` + toolName + `",
+				"description": "capture",
+				"input_schema": {"type": "object", "properties": {"url": {"type": "string"}}}
+			}
+		],
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "capture it"}]}]
+	}`)
+	requestJSON := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", originalRequest, false)
+	aliasedName := gjson.GetBytes(requestJSON, "request.tools.0.functionDeclarations.0.name").String()
+	if aliasedName == "" {
+		t.Fatal("expected translated request to contain a tool alias")
+	}
+
+	responseJSON := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-6",
+			"candidates": [{
+				"content": {
+					"parts": [{
+						"functionCall": {
+							"id": "call_456",
+							"name": "` + aliasedName + `",
+							"args": {"url": "https://example.com"}
+						}
+					}]
+				}
+			}]
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", originalRequest, requestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(output, "content.0.id").String(); got != "call_456" {
+		t.Fatalf("non-stream output should reuse upstream functionCall.id, got %q", got)
+	}
+	if got := gjson.GetBytes(output, "content.0.name").String(); got != toolName {
+		t.Fatalf("non-stream output should restore the original opaque tool name, got %q", got)
 	}
 }
