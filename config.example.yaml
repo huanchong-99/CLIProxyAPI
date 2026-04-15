@@ -66,6 +66,13 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Backend-owned usage persistence and history pruning
+# usage-persistence:
+#   enabled: true
+#   path: "data/usage-statistics.json"
+#   flush-interval: "15s"
+#   flush-on-shutdown: true
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
@@ -218,6 +225,26 @@ nonstream-keepalive-interval: 0
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
+
+# Zhipu API keys
+# zhipu-api-key:
+#   - api-key: "glm-..." # use the official Zhipu key
+#     # base-url defaults to https://open.bigmodel.cn/api/anthropic
+#     # base-url: "https://open.bigmodel.cn/api/anthropic"
+#     prefix: "teamA" # optional: require calls like "teamA/glm-4.5" to target this credential
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     models:
+#       - name: "glm-4.5" # upstream model name
+#         alias: "glm-4.5" # client alias mapped to the upstream model
+#         thinking: # optional: preserved for compatibility with legacy OpenAI-compatible Zhipu configs
+#           levels: ["low", "medium", "high"]
+#     excluded-models:
+#       - "glm-4.5-*" # exclude specific models (exact match / wildcard)
+#   # Legacy bridge: older openai-compatibility entries named "zhipu" are still accepted for one release,
+#   # but new config writes should use zhipu-api-key.
 
 # OpenAI compatibility providers
 # openai-compatibility:

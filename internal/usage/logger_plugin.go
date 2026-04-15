@@ -64,8 +64,14 @@ type RequestStatistics struct {
 	successCount  int64
 	failureCount  int64
 	totalTokens   int64
+	summary       UsageTotals
 
 	apis map[string]*apiStats
+
+	providers   map[string]*providerTotalsState
+	models      map[string]UsageTotals
+	days        map[string]*dayBucket
+	persistence PersistenceMetadata
 
 	requestsByDay  map[string]int64
 	requestsByHour map[int]int64
@@ -93,6 +99,10 @@ type RequestDetail struct {
 	LatencyMs int64      `json:"latency_ms"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
+	Provider  string     `json:"provider,omitempty"`
+	APIKey    string     `json:"api_key,omitempty"`
+	APIName   string     `json:"api_name,omitempty"`
+	AuthID    string     `json:"auth_id,omitempty"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
@@ -144,6 +154,9 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
 		apis:           make(map[string]*apiStats),
+		providers:      make(map[string]*providerTotalsState),
+		models:         make(map[string]UsageTotals),
+		days:           make(map[string]*dayBucket),
 		requestsByDay:  make(map[string]int64),
 		requestsByHour: make(map[int]int64),
 		tokensByDay:    make(map[string]int64),
@@ -178,38 +191,29 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if modelName == "" {
 		modelName = "unknown"
 	}
-	dayKey := timestamp.Format("2006-01-02")
-	hourKey := timestamp.Hour()
+	providerName := strings.TrimSpace(record.Provider)
+	if providerName == "" {
+		providerName = "unknown"
+	}
+	persisted := normalisePersistedRecord(PersistedRequestRecord{
+		Timestamp: timestamp,
+		Provider:  providerName,
+		APIKey:    record.APIKey,
+		APIName:   statsKey,
+		AuthID:    record.AuthID,
+		AuthIndex: record.AuthIndex,
+		Model:     modelName,
+		Source:    record.Source,
+		LatencyMs: normaliseLatency(record.Latency),
+		Failed:    failed,
+		Tokens:    detail,
+	}, "")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.totalRequests++
-	if success {
-		s.successCount++
-	} else {
-		s.failureCount++
-	}
-	s.totalTokens += totalTokens
-
-	stats, ok := s.apis[statsKey]
-	if !ok {
-		stats = &apiStats{Models: make(map[string]*modelStats)}
-		s.apis[statsKey] = stats
-	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
-	})
-
-	s.requestsByDay[dayKey]++
-	s.requestsByHour[hourKey]++
-	s.tokensByDay[dayKey] += totalTokens
-	s.tokensByHour[hourKey] += totalTokens
+	_ = success
+	_ = totalTokens
+	s.applyPersistedRecordLocked(persisted)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -234,6 +238,15 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	return s.snapshotLocked()
+}
+
+func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
+	result := StatisticsSnapshot{}
+	if s == nil {
+		return result
+	}
 
 	result.TotalRequests = s.totalRequests
 	result.SuccessCount = s.successCount
@@ -300,32 +313,12 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	seen := make(map[string]struct{})
-	for apiName, stats := range s.apis {
-		if stats == nil {
-			continue
-		}
-		for modelName, modelStatsValue := range stats.Models {
-			if modelStatsValue == nil {
-				continue
-			}
-			for _, detail := range modelStatsValue.Details {
-				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
-			}
-		}
-	}
+	seen := s.dedupSetLocked()
 
 	for apiName, apiSnapshot := range snapshot.APIs {
 		apiName = strings.TrimSpace(apiName)
 		if apiName == "" {
 			continue
-		}
-		stats, ok := s.apis[apiName]
-		if !ok || stats == nil {
-			stats = &apiStats{Models: make(map[string]*modelStats)}
-			s.apis[apiName] = stats
-		} else if stats.Models == nil {
-			stats.Models = make(map[string]*modelStats)
 		}
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelName = strings.TrimSpace(modelName)
@@ -333,20 +326,29 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				modelName = "unknown"
 			}
 			for _, detail := range modelSnapshot.Details {
-				detail.Tokens = normaliseTokenStats(detail.Tokens)
-				if detail.LatencyMs < 0 {
-					detail.LatencyMs = 0
+				record := normalisePersistedRecord(PersistedRequestRecord{
+					Timestamp: detail.Timestamp,
+					Provider:  strings.TrimSpace(detail.Provider),
+					APIKey:    firstNonEmpty(detail.APIKey, apiName),
+					APIName:   apiName,
+					AuthID:    detail.AuthID,
+					AuthIndex: detail.AuthIndex,
+					Model:     modelName,
+					Source:    detail.Source,
+					LatencyMs: detail.LatencyMs,
+					Failed:    detail.Failed,
+					Tokens:    detail.Tokens,
+				}, "")
+				if record.Provider == "" {
+					record.Provider = apiName
 				}
-				if detail.Timestamp.IsZero() {
-					detail.Timestamp = time.Now()
-				}
-				key := dedupKey(apiName, modelName, detail)
+				key := record.dedupKey()
 				if _, exists := seen[key]; exists {
 					result.Skipped++
 					continue
 				}
 				seen[key] = struct{}{}
-				s.recordImported(apiName, modelName, stats, detail)
+				s.applyPersistedRecordLocked(record)
 				result.Added++
 			}
 		}
@@ -481,4 +483,13 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

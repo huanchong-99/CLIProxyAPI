@@ -212,6 +212,43 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	// Zhipu keys (do not print key material)
+	if len(oldCfg.ZhipuAPIKey) != len(newCfg.ZhipuAPIKey) {
+		changes = append(changes, fmt.Sprintf("zhipu-api-key count: %d -> %d", len(oldCfg.ZhipuAPIKey), len(newCfg.ZhipuAPIKey)))
+	} else {
+		for i := range oldCfg.ZhipuAPIKey {
+			o := oldCfg.ZhipuAPIKey[i]
+			n := newCfg.ZhipuAPIKey[i]
+			oldBase := normalizeZhipuBaseURL(o.BaseURL)
+			newBase := normalizeZhipuBaseURL(n.BaseURL)
+			if oldBase != newBase {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].base-url: %s -> %s", i, oldBase, newBase))
+			}
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].headers: updated", i))
+			}
+			oldModels := summarizeZhipuModels(o.Models)
+			newModels := summarizeZhipuModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("zhipu[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+		}
+	}
+
 	// AmpCode settings (redacted where needed)
 	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
 	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
@@ -410,4 +447,37 @@ func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
 		}
 	}
 	return true
+}
+
+type zhipuModelsSummary struct {
+	hash  string
+	count int
+}
+
+func summarizeZhipuModels(models []config.ZhipuModel) zhipuModelsSummary {
+	if len(models) == 0 {
+		return zhipuModelsSummary{}
+	}
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+		}
+	})
+	return zhipuModelsSummary{
+		hash:  hashJoined(keys),
+		count: len(keys),
+	}
+}
+
+func normalizeZhipuBaseURL(raw string) string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return config.DefaultZhipuBaseURL
+	}
+	return base
 }

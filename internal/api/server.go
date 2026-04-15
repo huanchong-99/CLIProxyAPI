@@ -166,6 +166,13 @@ type Server struct {
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
 	managementRoutesEnabled atomic.Bool
+	usagePersistenceMu      sync.Mutex
+	usagePersistenceStop    chan struct{}
+	usagePersistenceDone    chan struct{}
+	usagePersistencePath    string
+	usagePersistenceEnabled bool
+	usageFlushInterval      time.Duration
+	usageFlushOnShutdown    bool
 
 	// envManagementSecret indicates whether MANAGEMENT_PASSWORD is configured.
 	envManagementSecret bool
@@ -274,6 +281,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
 	s.localPassword = optionState.localPassword
+	s.configureUsagePersistence(nil, cfg)
 
 	// Setup routes
 	s.setupRoutes()
@@ -493,8 +501,12 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/history", s.mgmt.GetUsageHistory)
+		mgmt.GET("/usage/persistence", s.mgmt.GetUsagePersistence)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
+		mgmt.POST("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.POST("/usage/prune", s.mgmt.PruneUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -615,6 +627,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
+		mgmt.GET("/zhipu-api-key", s.mgmt.GetZhipuKeys)
+		mgmt.PUT("/zhipu-api-key", s.mgmt.PutZhipuKeys)
+		mgmt.PATCH("/zhipu-api-key", s.mgmt.PatchZhipuKey)
+		mgmt.DELETE("/zhipu-api-key", s.mgmt.DeleteZhipuKey)
 
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
@@ -835,6 +851,10 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	if err := s.stopUsagePersistenceLoop(true); err != nil {
+		return err
+	}
+
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
@@ -1002,22 +1022,26 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
+	zhipuAPIKeyCount := len(cfg.ZhipuAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
 		entry := cfg.OpenAICompatibility[i]
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + zhipuAPIKeyCount + openAICompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d Zhipu keys + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		vertexAICompatCount,
+		zhipuAPIKeyCount,
 		openAICompatCount,
 	)
+
+	s.configureUsagePersistence(oldCfg, cfg)
 }
 
 func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
@@ -1092,4 +1116,161 @@ func configuredSignatureBypassStrict(cfg *config.Config) bool {
 		return *cfg.AntigravitySignatureBypassStrict
 	}
 	return false
+}
+
+func (s *Server) configureUsagePersistence(oldCfg, cfg *config.Config) {
+	if s == nil || s.mgmt == nil || s.mgmt.UsageStatistics() == nil || cfg == nil {
+		return
+	}
+	path, interval, enabled, flushOnShutdown := resolveUsagePersistence(cfg, s.configFilePath)
+	oldPath, oldInterval, oldEnabled, _ := resolveUsagePersistence(oldCfg, s.configFilePath)
+
+	if load := enabled && (oldCfg == nil || !oldEnabled || oldPath != path); load {
+		if err := s.loadUsagePersistence(path); err != nil {
+			log.WithError(err).Warn("failed to load usage persistence")
+		}
+	}
+
+	s.usagePersistenceMu.Lock()
+	s.usagePersistenceEnabled = enabled
+	s.usagePersistencePath = path
+	s.usageFlushInterval = interval
+	s.usageFlushOnShutdown = flushOnShutdown
+	s.usagePersistenceMu.Unlock()
+
+	meta := s.mgmt.UsageStatistics().PersistenceStatus()
+	meta.Enabled = enabled
+	meta.Path = path
+	s.mgmt.UsageStatistics().SetPersistenceStatus(meta)
+
+	loopChanged := enabled != oldEnabled || path != oldPath || interval != oldInterval
+	if oldCfg == nil || loopChanged {
+		if err := s.restartUsagePersistenceLoop(); err != nil {
+			log.WithError(err).Warn("failed to restart usage persistence loop")
+		}
+	}
+}
+
+func resolveUsagePersistence(cfg *config.Config, configFilePath string) (string, time.Duration, bool, bool) {
+	if cfg == nil {
+		return "", 0, false, false
+	}
+	path := strings.TrimSpace(cfg.UsagePersistence.Path)
+	if path == "" {
+		path = config.DefaultUsagePersistencePath
+	}
+	if !filepath.IsAbs(path) {
+		baseDir := "."
+		if trimmed := strings.TrimSpace(configFilePath); trimmed != "" {
+			baseDir = filepath.Dir(trimmed)
+		}
+		path = filepath.Join(baseDir, path)
+	}
+	interval := 15 * time.Second
+	if raw := strings.TrimSpace(cfg.UsagePersistence.FlushInterval); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			interval = parsed
+		}
+	}
+	return path, interval, cfg.UsagePersistence.Enabled, cfg.UsagePersistence.FlushOnShutdown
+}
+
+func (s *Server) restartUsagePersistenceLoop() error {
+	if s == nil {
+		return nil
+	}
+	if err := s.stopUsagePersistenceLoop(false); err != nil {
+		return err
+	}
+	s.usagePersistenceMu.Lock()
+	enabled := s.usagePersistenceEnabled
+	interval := s.usageFlushInterval
+	path := s.usagePersistencePath
+	if !enabled || interval <= 0 || path == "" {
+		s.usagePersistenceMu.Unlock()
+		return nil
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	s.usagePersistenceStop = stopCh
+	s.usagePersistenceDone = doneCh
+	s.usagePersistenceMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		defer close(doneCh)
+		for {
+			select {
+			case <-ticker.C:
+				if err := s.flushUsageStatistics(); err != nil {
+					log.WithError(err).Warn("failed to flush usage statistics")
+				}
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+func (s *Server) stopUsagePersistenceLoop(flush bool) error {
+	if s == nil {
+		return nil
+	}
+	s.usagePersistenceMu.Lock()
+	stopCh := s.usagePersistenceStop
+	doneCh := s.usagePersistenceDone
+	s.usagePersistenceStop = nil
+	s.usagePersistenceDone = nil
+	shouldFlush := flush && s.usagePersistenceEnabled && s.usageFlushOnShutdown
+	s.usagePersistenceMu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if doneCh != nil {
+		<-doneCh
+	}
+	if shouldFlush {
+		if err := s.flushUsageStatistics(); err != nil {
+			return fmt.Errorf("failed to flush usage statistics during shutdown: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) flushUsageStatistics() error {
+	if s == nil || s.mgmt == nil || s.mgmt.UsageStatistics() == nil {
+		return nil
+	}
+	s.usagePersistenceMu.Lock()
+	enabled := s.usagePersistenceEnabled
+	path := s.usagePersistencePath
+	s.usagePersistenceMu.Unlock()
+	if !enabled || path == "" {
+		return nil
+	}
+	_, err := s.mgmt.UsageStatistics().SaveToFile(path)
+	return err
+}
+
+func (s *Server) loadUsagePersistence(path string) error {
+	if s == nil || s.mgmt == nil || s.mgmt.UsageStatistics() == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := s.mgmt.UsageStatistics().LoadFromFile(path); err != nil {
+		corruptPath := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UTC().Unix())
+		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+			log.WithError(renameErr).Warn("failed to preserve corrupt usage persistence file")
+		}
+		return err
+	}
+	return nil
 }

@@ -18,6 +18,7 @@ type staticModelsJSON struct {
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	IFlow       []*ModelInfo `json:"iflow"`
+	Zhipu       []*ModelInfo `json:"zhipu"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 }
@@ -72,6 +73,11 @@ func GetIFlowModels() []*ModelInfo {
 	return cloneModelInfos(getModels().IFlow)
 }
 
+// GetZhipuModels returns the standard Zhipu model definitions.
+func GetZhipuModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Zhipu)
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
@@ -105,6 +111,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - aistudio
 //   - codex
 //   - iflow
+//   - zhipu
 //   - kimi
 //   - antigravity
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
@@ -124,6 +131,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodexProModels()
 	case "iflow":
 		return GetIFlowModels()
+	case "zhipu":
+		return GetZhipuModels()
 	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
@@ -149,6 +158,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.AIStudio,
 		data.CodexPro,
 		data.IFlow,
+		data.Zhipu,
 		data.Kimi,
 		data.Antigravity,
 	}

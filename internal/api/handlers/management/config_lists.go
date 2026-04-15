@@ -728,6 +728,172 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 	h.persist(c)
 }
 
+// zhipu-api-key: []ZhipuKey
+func (h *Handler) GetZhipuKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"zhipu-api-key": h.cfg.ZhipuAPIKey})
+}
+
+func (h *Handler) PutZhipuKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.ZhipuKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.ZhipuKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	for i := range arr {
+		normalizeZhipuKey(&arr[i])
+		if arr[i].APIKey == "" {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("zhipu-api-key[%d].api-key is required", i)})
+			return
+		}
+	}
+	h.cfg.ZhipuAPIKey = append([]config.ZhipuKey(nil), arr...)
+	h.cfg.SanitizeZhipuKeys()
+	h.persist(c)
+}
+
+func (h *Handler) PatchZhipuKey(c *gin.Context) {
+	type zhipuKeyPatch struct {
+		APIKey         *string              `json:"api-key"`
+		Priority       *int                 `json:"priority"`
+		Prefix         *string              `json:"prefix"`
+		BaseURL        *string              `json:"base-url"`
+		ProxyURL       *string              `json:"proxy-url"`
+		Headers        *map[string]string   `json:"headers"`
+		Models         *[]config.ZhipuModel `json:"models"`
+		ExcludedModels *[]string            `json:"excluded-models"`
+	}
+	var body struct {
+		Index *int           `json:"index"`
+		Match *string        `json:"match"`
+		Value *zhipuKeyPatch `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	targetIndex := -1
+	switch {
+	case body.Index != nil:
+		if *body.Index < 0 || *body.Index >= len(h.cfg.ZhipuAPIKey) {
+			c.JSON(404, gin.H{"error": "index out of range"})
+			return
+		}
+		targetIndex = *body.Index
+	case body.Match != nil:
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.ZhipuAPIKey {
+			if strings.TrimSpace(h.cfg.ZhipuAPIKey[i].APIKey) == match {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex < 0 {
+			c.JSON(404, gin.H{"error": "entry not found"})
+			return
+		}
+	default:
+		c.JSON(400, gin.H{"error": "index or match is required"})
+		return
+	}
+
+	entry := h.cfg.ZhipuAPIKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = *body.Value.APIKey
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = *body.Value.Prefix
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = *body.Value.BaseURL
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = *body.Value.ProxyURL
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = *body.Value.Headers
+	}
+	if body.Value.Models != nil {
+		entry.Models = *body.Value.Models
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = *body.Value.ExcludedModels
+	}
+
+	normalizeZhipuKey(&entry)
+	h.cfg.ZhipuAPIKey[targetIndex] = entry
+	h.cfg.SanitizeZhipuKeys()
+	h.persist(c)
+}
+
+func (h *Handler) DeleteZhipuKey(c *gin.Context) {
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
+			base := strings.TrimSpace(baseRaw)
+			out := make([]config.ZhipuKey, 0, len(h.cfg.ZhipuAPIKey))
+			for _, v := range h.cfg.ZhipuAPIKey {
+				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+					continue
+				}
+				out = append(out, v)
+			}
+			h.cfg.ZhipuAPIKey = out
+			h.cfg.SanitizeZhipuKeys()
+			h.persist(c)
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.ZhipuAPIKey {
+			if strings.TrimSpace(h.cfg.ZhipuAPIKey[i].APIKey) == val {
+				matchIndex = i
+				matchCount++
+			}
+		}
+		if matchCount == 0 {
+			c.JSON(404, gin.H{"error": "entry not found"})
+			return
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple entries match api-key; specify base-url as well"})
+			return
+		}
+		h.cfg.ZhipuAPIKey = append(h.cfg.ZhipuAPIKey[:matchIndex], h.cfg.ZhipuAPIKey[matchIndex+1:]...)
+		h.cfg.SanitizeZhipuKeys()
+		h.persist(c)
+		return
+	}
+
+	indexRaw := strings.TrimSpace(c.Query("index"))
+	if indexRaw == "" {
+		c.JSON(400, gin.H{"error": "api-key or index is required"})
+		return
+	}
+	var index int
+	if _, err := fmt.Sscanf(indexRaw, "%d", &index); err != nil || index < 0 || index >= len(h.cfg.ZhipuAPIKey) {
+		c.JSON(404, gin.H{"error": "index out of range"})
+		return
+	}
+	h.cfg.ZhipuAPIKey = append(h.cfg.ZhipuAPIKey[:index], h.cfg.ZhipuAPIKey[index+1:]...)
+	h.cfg.SanitizeZhipuKeys()
+	h.persist(c)
+}
+
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 	var body struct {
 		Provider *string  `json:"provider"`
@@ -1140,6 +1306,35 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 		return
 	}
 	normalized := make([]config.VertexCompatModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" || model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+func normalizeZhipuKey(entry *config.ZhipuKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	if entry.BaseURL == "" {
+		entry.BaseURL = config.DefaultZhipuBaseURL
+	}
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.ZhipuModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)

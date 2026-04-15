@@ -38,7 +38,8 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
-	cfg *config.Config
+	provider string
+	cfg      *config.Config
 }
 
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
@@ -83,9 +84,57 @@ var oauthToolsToRemove = map[string]bool{}
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+const defaultClaudeProvider = "claude"
 
-func (e *ClaudeExecutor) Identifier() string { return "claude" }
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	return NewClaudeExecutorWithProvider(defaultClaudeProvider, cfg)
+}
+
+func NewClaudeExecutorWithProvider(provider string, cfg *config.Config) *ClaudeExecutor {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = defaultClaudeProvider
+	}
+	return &ClaudeExecutor{provider: provider, cfg: cfg}
+}
+
+func (e *ClaudeExecutor) Identifier() string {
+	if e == nil || strings.TrimSpace(e.provider) == "" {
+		return defaultClaudeProvider
+	}
+	return e.provider
+}
+
+func applyClaudeAuthHeader(req *http.Request, auth *cliproxyauth.Auth, apiKey string) {
+	if req == nil || strings.TrimSpace(apiKey) == "" {
+		return
+	}
+	if shouldUseClaudeAPIKeyHeader(req, auth) {
+		req.Header.Del("Authorization")
+		req.Header.Set("x-api-key", apiKey)
+		return
+	}
+	req.Header.Del("x-api-key")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+}
+
+func shouldUseClaudeAPIKeyHeader(req *http.Request, auth *cliproxyauth.Auth) bool {
+	if req == nil || req.URL == nil || auth == nil || auth.Attributes == nil {
+		return false
+	}
+	if strings.TrimSpace(auth.Attributes["api_key"]) == "" {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(req.URL.Scheme))
+	if scheme != "" && scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(req.URL.Hostname()))
+	if host == "api.anthropic.com" {
+		return true
+	}
+	return host == "bigmodel.cn" || host == "open.bigmodel.cn" || strings.HasSuffix(host, ".bigmodel.cn")
+}
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -96,15 +145,7 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if strings.TrimSpace(apiKey) == "" {
 		return nil
 	}
-	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	isAnthropicBase := req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
-		req.Header.Del("Authorization")
-		req.Header.Set("x-api-key", apiKey)
-	} else {
-		req.Header.Del("x-api-key")
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	applyClaudeAuthHeader(req, auth, apiKey)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -291,6 +332,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 				reporter.Publish(ctx, detail)
 			}
 		}
+		reporter.EnsurePublished(ctx)
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
@@ -462,6 +504,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Errorf("response body close error: %v", errClose)
 			}
 		}()
+		defer reporter.EnsurePublished(ctx)
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
@@ -881,13 +924,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
-		r.Header.Del("Authorization")
-		r.Header.Set("x-api-key", apiKey)
-	} else {
-		r.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	isAnthropicBase := r.URL != nil && strings.EqualFold(strings.TrimSpace(r.URL.Scheme), "https") && strings.EqualFold(strings.TrimSpace(r.URL.Hostname()), "api.anthropic.com")
+	applyClaudeAuthHeader(r, auth, apiKey)
 	r.Header.Set("Content-Type", "application/json")
 
 	var ginHeaders http.Header

@@ -22,6 +22,9 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultZhipuBaseURL          = "https://open.bigmodel.cn/api/anthropic"
+	DefaultUsagePersistencePath  = "data/usage-statistics.json"
+	DefaultUsageFlushInterval    = "15s"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -64,6 +67,9 @@ type Config struct {
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+
+	// UsagePersistence controls backend-owned usage history persistence.
+	UsagePersistence UsagePersistence `yaml:"usage-persistence" json:"usage-persistence"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -119,6 +125,10 @@ type Config struct {
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// ZhipuAPIKey defines first-class Zhipu API key configurations.
+	// The default base URL is the Anthropic-compatible Zhipu endpoint.
+	ZhipuAPIKey []ZhipuKey `yaml:"zhipu-api-key" json:"zhipu-api-key"`
 
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
@@ -179,6 +189,14 @@ type PprofConfig struct {
 	Enable bool `yaml:"enable" json:"enable"`
 	// Addr is the host:port address for the pprof HTTP server.
 	Addr string `yaml:"addr" json:"addr"`
+}
+
+// UsagePersistence holds persistent usage-history configuration.
+type UsagePersistence struct {
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Path            string `yaml:"path" json:"path"`
+	FlushInterval   string `yaml:"flush-interval" json:"flush-interval"`
+	FlushOnShutdown bool   `yaml:"flush-on-shutdown" json:"flush-on-shutdown"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -587,6 +605,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsagePersistence.Enabled = true
+	cfg.UsagePersistence.Path = DefaultUsagePersistencePath
+	cfg.UsagePersistence.FlushInterval = DefaultUsageFlushInterval
+	cfg.UsagePersistence.FlushOnShutdown = true
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -648,6 +670,15 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.ErrorLogsMaxFiles = 10
 	}
 
+	cfg.UsagePersistence.Path = strings.TrimSpace(cfg.UsagePersistence.Path)
+	if cfg.UsagePersistence.Path == "" {
+		cfg.UsagePersistence.Path = DefaultUsagePersistencePath
+	}
+	cfg.UsagePersistence.FlushInterval = strings.TrimSpace(cfg.UsagePersistence.FlushInterval)
+	if cfg.UsagePersistence.FlushInterval == "" {
+		cfg.UsagePersistence.FlushInterval = DefaultUsageFlushInterval
+	}
+
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
@@ -657,6 +688,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Vertex-compatible API keys.
 	cfg.SanitizeVertexCompatKeys()
+
+	// Bridge legacy OpenAI-compatibility Zhipu entries into the first-class provider block.
+	cfg.SynthesizeLegacyZhipuKeys()
+
+	// Sanitize Zhipu keys: trim fields, deduplicate, and normalize defaults.
+	cfg.SanitizeZhipuKeys()
 
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
@@ -903,6 +940,101 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out
+}
+
+// SynthesizeLegacyZhipuKeys bridges one-release legacy OpenAI-compatibility Zhipu
+// configs into the first-class zhipu-api-key block without mutating the source file.
+func (cfg *Config) SynthesizeLegacyZhipuKeys() {
+	if cfg == nil || len(cfg.OpenAICompatibility) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(cfg.ZhipuAPIKey))
+	for i := range cfg.ZhipuAPIKey {
+		entry := cfg.ZhipuAPIKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			baseURL = DefaultZhipuBaseURL
+		}
+		seen[entry.APIKey+"|"+baseURL] = struct{}{}
+	}
+
+	for i := range cfg.OpenAICompatibility {
+		entry := cfg.OpenAICompatibility[i]
+		if !isLegacyZhipuOpenAICompatibility(entry) || len(entry.APIKeyEntries) == 0 {
+			continue
+		}
+
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			baseURL = DefaultZhipuBaseURL
+		}
+		headers := NormalizeHeaders(entry.Headers)
+		prefix := normalizeModelPrefix(entry.Prefix)
+		models := convertLegacyZhipuModels(entry.Models)
+
+		for j := range entry.APIKeyEntries {
+			apiKeyEntry := entry.APIKeyEntries[j]
+			apiKey := strings.TrimSpace(apiKeyEntry.APIKey)
+			if apiKey == "" {
+				continue
+			}
+
+			key := apiKey + "|" + baseURL
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+
+			cfg.ZhipuAPIKey = append(cfg.ZhipuAPIKey, ZhipuKey{
+				APIKey:         apiKey,
+				Priority:       entry.Priority,
+				Prefix:         prefix,
+				BaseURL:        baseURL,
+				ProxyURL:       strings.TrimSpace(apiKeyEntry.ProxyURL),
+				Models:         append([]ZhipuModel(nil), models...),
+				Headers:        headers,
+				ExcludedModels: nil,
+			})
+		}
+	}
+}
+
+func isLegacyZhipuOpenAICompatibility(entry OpenAICompatibility) bool {
+	name := strings.ToLower(strings.TrimSpace(entry.Name))
+	if name == "zhipu" {
+		return true
+	}
+	baseURL := strings.ToLower(strings.TrimSpace(entry.BaseURL))
+	return baseURL == strings.ToLower(DefaultZhipuBaseURL)
+}
+
+func convertLegacyZhipuModels(models []OpenAICompatibilityModel) []ZhipuModel {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]ZhipuModel, 0, len(models))
+	for i := range models {
+		model := models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		out = append(out, ZhipuModel{
+			Name:     model.Name,
+			Alias:    model.Alias,
+			Thinking: model.Thinking,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func normalizeModelPrefix(prefix string) string {
@@ -1321,6 +1453,12 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == DefaultPprofAddr
 		case "remote-management.panel-github-repository":
 			return node.Value == DefaultPanelGitHubRepository
+		case "zhipu-api-key.base-url":
+			return node.Value == DefaultZhipuBaseURL
+		case "usage-persistence.path":
+			return node.Value == DefaultUsagePersistencePath
+		case "usage-persistence.flush-interval":
+			return node.Value == DefaultUsageFlushInterval
 		case "routing.strategy":
 			return node.Value == "round-robin"
 		}

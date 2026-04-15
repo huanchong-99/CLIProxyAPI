@@ -8,13 +8,14 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	usagepkg "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // usageTabModel displays usage statistics with charts and breakdowns.
 type usageTabModel struct {
 	client   *Client
 	viewport viewport.Model
-	usage    map[string]any
+	usage    usagepkg.UsageOverview
 	err      error
 	width    int
 	height   int
@@ -22,14 +23,12 @@ type usageTabModel struct {
 }
 
 type usageDataMsg struct {
-	usage map[string]any
+	usage usagepkg.UsageOverview
 	err   error
 }
 
 func newUsageTabModel(client *Client) usageTabModel {
-	return usageTabModel{
-		client: client,
-	}
+	return usageTabModel{client: client}
 }
 
 func (m usageTabModel) Init() tea.Cmd {
@@ -55,7 +54,6 @@ func (m usageTabModel) Update(msg tea.Msg) (usageTabModel, tea.Cmd) {
 		}
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
-
 	case tea.KeyMsg:
 		if msg.String() == "r" {
 			return m, m.fetchData
@@ -77,10 +75,10 @@ func (m *usageTabModel) SetSize(w, h int) {
 		m.viewport = viewport.New(w, h)
 		m.viewport.SetContent(m.renderContent())
 		m.ready = true
-	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		return
 	}
+	m.viewport.Width = w
+	m.viewport.Height = h
 }
 
 func (m usageTabModel) View() string {
@@ -99,30 +97,23 @@ func (m usageTabModel) renderContent() string {
 	sb.WriteString("\n\n")
 
 	if m.err != nil {
-		sb.WriteString(errorStyle.Render("⚠ Error: " + m.err.Error()))
+		sb.WriteString(errorStyle.Render("Error: " + m.err.Error()))
 		sb.WriteString("\n")
 		return sb.String()
 	}
 
-	if m.usage == nil {
+	snapshot := m.usage.Usage
+	if snapshot.TotalRequests == 0 && len(snapshot.APIs) == 0 && len(m.usage.RecentDays) == 0 {
 		sb.WriteString(subtitleStyle.Render(T("usage_no_data")))
 		sb.WriteString("\n")
 		return sb.String()
 	}
 
-	usageMap, _ := m.usage["usage"].(map[string]any)
-	if usageMap == nil {
-		sb.WriteString(subtitleStyle.Render(T("usage_no_data")))
-		sb.WriteString("\n")
-		return sb.String()
-	}
+	totalReqs := snapshot.TotalRequests
+	successCnt := snapshot.SuccessCount
+	failureCnt := snapshot.FailureCount
+	totalTokens := snapshot.TotalTokens
 
-	totalReqs := int64(getFloat(usageMap, "total_requests"))
-	successCnt := int64(getFloat(usageMap, "success_count"))
-	failureCnt := int64(getFloat(usageMap, "failure_count"))
-	totalTokens := int64(getFloat(usageMap, "total_tokens"))
-
-	// ━━━ Overview Cards ━━━
 	cardWidth := 20
 	if m.width > 0 {
 		cardWidth = (m.width - 6) / 4
@@ -137,85 +128,71 @@ func (m usageTabModel) renderContent() string {
 		Width(cardWidth).
 		Height(3)
 
-	// Total Requests
 	card1 := cardStyle.Copy().BorderForeground(lipgloss.Color("111")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_reqs")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("%d", totalReqs)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("● %s: %d  ● %s: %d", T("usage_success"), successCnt, T("usage_failure"), failureCnt)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %d  %s: %d", T("usage_success"), successCnt, T("usage_failure"), failureCnt)),
 	))
-
-	// Total Tokens
 	card2 := cardStyle.Copy().BorderForeground(lipgloss.Color("214")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_tokens")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(formatLargeNumber(totalTokens)),
 		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %s", T("usage_total_token_l"), formatLargeNumber(totalTokens))),
 	))
-
-	// RPM
-	rpm := float64(0)
-	if totalReqs > 0 {
-		if rByH, ok := usageMap["requests_by_hour"].(map[string]any); ok && len(rByH) > 0 {
-			rpm = float64(totalReqs) / float64(len(rByH)) / 60.0
-		}
-	}
 	card3 := cardStyle.Copy().BorderForeground(lipgloss.Color("76")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
-		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_rpm")),
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("%.2f", rpm)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %d", T("usage_total_reqs"), totalReqs)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render("Providers"),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("%d", len(m.usage.Providers))),
+		lipgloss.NewStyle().Foreground(colorMuted).Render("Breakdown by provider"),
 	))
-
-	// TPM
-	tpm := float64(0)
-	if totalTokens > 0 {
-		if tByH, ok := usageMap["tokens_by_hour"].(map[string]any); ok && len(tByH) > 0 {
-			tpm = float64(totalTokens) / float64(len(tByH)) / 60.0
-		}
-	}
 	card4 := cardStyle.Copy().BorderForeground(lipgloss.Color("170")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
-		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_tpm")),
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("%.2f", tpm)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %s", T("usage_total_tokens"), formatLargeNumber(totalTokens))),
+		lipgloss.NewStyle().Foreground(colorMuted).Render("Days"),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("%d", len(m.usage.RecentDays))),
+		lipgloss.NewStyle().Foreground(colorMuted).Render("Recent history"),
 	))
 
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
 	sb.WriteString("\n\n")
 
-	// ━━━ Requests by Hour (ASCII bar chart) ━━━
-	if rByH, ok := usageMap["requests_by_hour"].(map[string]any); ok && len(rByH) > 0 {
+	if hasUsagePersistence(m.usage.Persistence) {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("Usage Persistence"))
+		sb.WriteString("\n")
+		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
+		sb.WriteString("\n")
+		sb.WriteString(renderPersistenceSummary(m.usage.Persistence))
+		sb.WriteString("\n")
+	}
+
+	if len(snapshot.RequestsByHour) > 0 {
 		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_req_by_hour")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
-		sb.WriteString(renderBarChart(rByH, m.width-6, lipgloss.Color("111")))
+		sb.WriteString(renderIntBarChart(snapshot.RequestsByHour, m.width-6, lipgloss.Color("111")))
 		sb.WriteString("\n")
 	}
 
-	// ━━━ Tokens by Hour ━━━
-	if tByH, ok := usageMap["tokens_by_hour"].(map[string]any); ok && len(tByH) > 0 {
+	if len(snapshot.TokensByHour) > 0 {
 		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_tok_by_hour")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
-		sb.WriteString(renderBarChart(tByH, m.width-6, lipgloss.Color("214")))
+		sb.WriteString(renderIntBarChart(snapshot.TokensByHour, m.width-6, lipgloss.Color("214")))
 		sb.WriteString("\n")
 	}
 
-	// ━━━ Requests by Day ━━━
-	if rByD, ok := usageMap["requests_by_day"].(map[string]any); ok && len(rByD) > 0 {
-		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_req_by_day")))
+	if len(m.usage.RecentDays) > 0 {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("Recent Days"))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
-		sb.WriteString(renderBarChart(rByD, m.width-6, lipgloss.Color("76")))
+		sb.WriteString(renderRecentDaysSummary(m.usage.RecentDays))
 		sb.WriteString("\n")
 	}
 
-	// ━━━ API Detail Stats ━━━
-	if apis, ok := usageMap["apis"].(map[string]any); ok && len(apis) > 0 {
+	if len(snapshot.APIs) > 0 {
 		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_api_detail")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 80)))
@@ -225,35 +202,31 @@ func (m usageTabModel) renderContent() string {
 		sb.WriteString(tableHeaderStyle.Render(header))
 		sb.WriteString("\n")
 
-		for apiName, apiSnap := range apis {
-			if apiMap, ok := apiSnap.(map[string]any); ok {
-				apiReqs := int64(getFloat(apiMap, "total_requests"))
-				apiToks := int64(getFloat(apiMap, "total_tokens"))
+		apiNames := make([]string, 0, len(snapshot.APIs))
+		for apiName := range snapshot.APIs {
+			apiNames = append(apiNames, apiName)
+		}
+		sort.Strings(apiNames)
+		for _, apiName := range apiNames {
+			apiSnap := snapshot.APIs[apiName]
+			row := fmt.Sprintf("  %-30s %10d %12s",
+				truncate(maskKey(apiName), 30), apiSnap.TotalRequests, formatLargeNumber(apiSnap.TotalTokens))
+			sb.WriteString(lipgloss.NewStyle().Bold(true).Render(row))
+			sb.WriteString("\n")
 
-				row := fmt.Sprintf("  %-30s %10d %12s",
-					truncate(maskKey(apiName), 30), apiReqs, formatLargeNumber(apiToks))
-				sb.WriteString(lipgloss.NewStyle().Bold(true).Render(row))
+			modelNames := make([]string, 0, len(apiSnap.Models))
+			for model := range apiSnap.Models {
+				modelNames = append(modelNames, model)
+			}
+			sort.Strings(modelNames)
+			for _, model := range modelNames {
+				stats := apiSnap.Models[model]
+				modelRow := fmt.Sprintf("    ├─ %-28s %10d %12s",
+					truncate(model, 28), stats.TotalRequests, formatLargeNumber(stats.TotalTokens))
+				sb.WriteString(tableCellStyle.Render(modelRow))
 				sb.WriteString("\n")
-
-				// Per-model breakdown
-				if models, ok := apiMap["models"].(map[string]any); ok {
-					for model, v := range models {
-						if stats, ok := v.(map[string]any); ok {
-							mReqs := int64(getFloat(stats, "total_requests"))
-							mToks := int64(getFloat(stats, "total_tokens"))
-							mRow := fmt.Sprintf("    ├─ %-28s %10d %12s",
-								truncate(model, 28), mReqs, formatLargeNumber(mToks))
-							sb.WriteString(tableCellStyle.Render(mRow))
-							sb.WriteString("\n")
-
-							// Token type breakdown from details
-							sb.WriteString(m.renderTokenBreakdown(stats))
-
-							// Latency breakdown from details
-							sb.WriteString(m.renderLatencyBreakdown(stats))
-						}
-					}
-				}
+				sb.WriteString(renderModelTokenBreakdown(stats.Details))
+				sb.WriteString(renderModelLatencyBreakdown(stats.Details))
 			}
 		}
 	}
@@ -262,37 +235,17 @@ func (m usageTabModel) renderContent() string {
 	return sb.String()
 }
 
-// renderTokenBreakdown aggregates input/output/cached/reasoning tokens from model details.
-func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
-	details, ok := modelStats["details"]
-	if !ok {
+func renderModelTokenBreakdown(details []usagepkg.RequestDetail) string {
+	if len(details) == 0 {
 		return ""
 	}
-	detailList, ok := details.([]any)
-	if !ok || len(detailList) == 0 {
-		return ""
-	}
-
 	var inputTotal, outputTotal, cachedTotal, reasoningTotal int64
-	for _, d := range detailList {
-		dm, ok := d.(map[string]any)
-		if !ok {
-			continue
-		}
-		tokens, ok := dm["tokens"].(map[string]any)
-		if !ok {
-			continue
-		}
-		inputTotal += int64(getFloat(tokens, "input_tokens"))
-		outputTotal += int64(getFloat(tokens, "output_tokens"))
-		cachedTotal += int64(getFloat(tokens, "cached_tokens"))
-		reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
+	for _, detail := range details {
+		inputTotal += detail.Tokens.InputTokens
+		outputTotal += detail.Tokens.OutputTokens
+		cachedTotal += detail.Tokens.CachedTokens
+		reasoningTotal += detail.Tokens.ReasoningTokens
 	}
-
-	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 {
-		return ""
-	}
-
 	parts := []string{}
 	if inputTotal > 0 {
 		parts = append(parts, fmt.Sprintf("%s:%s", T("usage_input"), formatLargeNumber(inputTotal)))
@@ -306,12 +259,43 @@ func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 	if reasoningTotal > 0 {
 		parts = append(parts, fmt.Sprintf("%s:%s", T("usage_reasoning"), formatLargeNumber(reasoningTotal)))
 	}
-
-	return fmt.Sprintf("    │  %s\n",
-		lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(parts, "  ")))
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("    │  %s\n", lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(parts, "  ")))
 }
 
-// renderLatencyBreakdown aggregates latency_ms from model details and displays avg/min/max.
+func renderModelLatencyBreakdown(details []usagepkg.RequestDetail) string {
+	if len(details) == 0 {
+		return ""
+	}
+	var totalLatency int64
+	var count int64
+	var minLatency, maxLatency int64
+	for i, detail := range details {
+		latencyMs := detail.LatencyMs
+		if latencyMs <= 0 {
+			continue
+		}
+		totalLatency += latencyMs
+		count++
+		if i == 0 || minLatency == 0 || latencyMs < minLatency {
+			minLatency = latencyMs
+		}
+		if latencyMs > maxLatency {
+			maxLatency = latencyMs
+		}
+	}
+	if count == 0 {
+		return ""
+	}
+	avgLatency := totalLatency / count
+	return fmt.Sprintf("    │  %s: avg %dms  min %dms  max %dms\n",
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_time")),
+		avgLatency, minLatency, maxLatency)
+}
+
+// renderLatencyBreakdown keeps the historical test helper signature for map-based stats.
 func (m usageTabModel) renderLatencyBreakdown(modelStats map[string]any) string {
 	details, ok := modelStats["details"]
 	if !ok {
@@ -321,66 +305,33 @@ func (m usageTabModel) renderLatencyBreakdown(modelStats map[string]any) string 
 	if !ok || len(detailList) == 0 {
 		return ""
 	}
-
-	var totalLatency int64
-	var count int
-	var minLatency, maxLatency int64
-	first := true
-
-	for _, d := range detailList {
-		dm, ok := d.(map[string]any)
+	typed := make([]usagepkg.RequestDetail, 0, len(detailList))
+	for _, detail := range detailList {
+		detailMap, ok := detail.(map[string]any)
 		if !ok {
 			continue
 		}
-		latencyMs := int64(getFloat(dm, "latency_ms"))
-		if latencyMs <= 0 {
-			continue
-		}
-		totalLatency += latencyMs
-		count++
-		if first {
-			minLatency = latencyMs
-			maxLatency = latencyMs
-			first = false
-		} else {
-			if latencyMs < minLatency {
-				minLatency = latencyMs
-			}
-			if latencyMs > maxLatency {
-				maxLatency = latencyMs
-			}
-		}
+		typed = append(typed, usagepkg.RequestDetail{
+			LatencyMs: int64(getFloat(detailMap, "latency_ms")),
+		})
 	}
-
-	if count == 0 {
-		return ""
-	}
-
-	avgLatency := totalLatency / int64(count)
-	return fmt.Sprintf("    │  %s: avg %dms  min %dms  max %dms\n",
-		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_time")),
-		avgLatency, minLatency, maxLatency)
+	return renderModelLatencyBreakdown(typed)
 }
 
-// renderBarChart renders a simple ASCII horizontal bar chart.
-func renderBarChart(data map[string]any, maxBarWidth int, barColor lipgloss.Color) string {
+func renderIntBarChart(data map[string]int64, maxBarWidth int, barColor lipgloss.Color) string {
 	if maxBarWidth < 10 {
 		maxBarWidth = 10
 	}
-
-	// Sort keys
 	keys := make([]string, 0, len(data))
-	for k := range data {
-		keys = append(keys, k)
+	for key := range data {
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 
-	// Find max value
-	maxVal := float64(0)
-	for _, k := range keys {
-		v := getFloat(data, k)
-		if v > maxVal {
-			maxVal = v
+	maxVal := int64(0)
+	for _, key := range keys {
+		if data[key] > maxVal {
+			maxVal = data[key]
 		}
 	}
 	if maxVal == 0 {
@@ -388,31 +339,25 @@ func renderBarChart(data map[string]any, maxBarWidth int, barColor lipgloss.Colo
 	}
 
 	barStyle := lipgloss.NewStyle().Foreground(barColor)
-	var sb strings.Builder
-
 	labelWidth := 12
 	barAvail := maxBarWidth - labelWidth - 12
 	if barAvail < 5 {
 		barAvail = 5
 	}
 
-	for _, k := range keys {
-		v := getFloat(data, k)
-		barLen := int(v / maxVal * float64(barAvail))
-		if barLen < 1 && v > 0 {
+	var sb strings.Builder
+	for _, key := range keys {
+		value := data[key]
+		barLen := int(float64(value) / float64(maxVal) * float64(barAvail))
+		if barLen < 1 && value > 0 {
 			barLen = 1
 		}
-		bar := strings.Repeat("█", barLen)
-		label := k
-		if len(label) > labelWidth {
-			label = label[:labelWidth]
-		}
 		sb.WriteString(fmt.Sprintf("  %-*s %s %s\n",
-			labelWidth, label,
-			barStyle.Render(bar),
-			lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%.0f", v)),
+			labelWidth,
+			truncate(key, labelWidth),
+			barStyle.Render(strings.Repeat("█", barLen)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%d", value)),
 		))
 	}
-
 	return sb.String()
 }

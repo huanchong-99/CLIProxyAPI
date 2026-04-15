@@ -30,6 +30,7 @@ import (
 // Returns:
 //   - []string: All provider identifiers capable of serving the model, ordered by preference.
 func GetProviderName(modelName string) []string {
+	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
 		return nil
 	}

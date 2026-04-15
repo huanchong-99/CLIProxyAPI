@@ -46,6 +46,48 @@ var (
 	sfGroup             singleflight.Group
 )
 
+func managementStaticOverride() (string, bool) {
+	override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH"))
+	if override == "" {
+		return "", false
+	}
+	return filepath.Clean(override), true
+}
+
+func looksLikeFilePath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+
+	fileInfo, err := os.Stat(path)
+	if err == nil {
+		return !fileInfo.IsDir()
+	}
+
+	base := strings.ToLower(filepath.Base(path))
+	return strings.HasSuffix(base, ".html")
+}
+
+func managementAutoUpdateDisabled() (bool, string) {
+	if override, ok := managementStaticOverride(); ok {
+		return true, fmt.Sprintf("management asset path is pinned via MANAGEMENT_STATIC_PATH (%s)", override)
+	}
+
+	cfg := currentConfigPtr.Load()
+	if cfg == nil {
+		return false, ""
+	}
+	if cfg.RemoteManagement.DisableControlPanel {
+		return true, "control panel disabled"
+	}
+	if cfg.RemoteManagement.DisableAutoUpdatePanel {
+		return true, "disable-auto-update-panel is enabled"
+	}
+
+	return false, ""
+}
+
 // SetCurrentConfig stores the latest configuration snapshot for management asset decisions.
 func SetCurrentConfig(cfg *config.Config) {
 	if cfg == nil {
@@ -80,17 +122,15 @@ func runAutoUpdater(ctx context.Context) {
 	defer ticker.Stop()
 
 	runOnce := func() {
+		disabled, reason := managementAutoUpdateDisabled()
+		if disabled {
+			log.Debugf("management asset auto-updater skipped: %s", reason)
+			return
+		}
+
 		cfg := currentConfigPtr.Load()
 		if cfg == nil {
 			log.Debug("management asset auto-updater skipped: config not yet available")
-			return
-		}
-		if cfg.RemoteManagement.DisableControlPanel {
-			log.Debug("management asset auto-updater skipped: control panel disabled")
-			return
-		}
-		if cfg.RemoteManagement.DisableAutoUpdatePanel {
-			log.Debug("management asset auto-updater skipped: disable-auto-update-panel is enabled")
 			return
 		}
 
@@ -132,12 +172,11 @@ type releaseResponse struct {
 
 // StaticDir resolves the directory that stores the management control panel asset.
 func StaticDir(configFilePath string) string {
-	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
-		cleaned := filepath.Clean(override)
-		if strings.EqualFold(filepath.Base(cleaned), managementAssetName) {
-			return filepath.Dir(cleaned)
+	if override, ok := managementStaticOverride(); ok {
+		if looksLikeFilePath(override) {
+			return filepath.Dir(override)
 		}
-		return cleaned
+		return override
 	}
 
 	if writable := util.WritablePath(); writable != "" {
@@ -162,12 +201,11 @@ func StaticDir(configFilePath string) string {
 
 // FilePath resolves the absolute path to the management control panel asset.
 func FilePath(configFilePath string) string {
-	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
-		cleaned := filepath.Clean(override)
-		if strings.EqualFold(filepath.Base(cleaned), managementAssetName) {
-			return cleaned
+	if override, ok := managementStaticOverride(); ok {
+		if looksLikeFilePath(override) {
+			return override
 		}
-		return filepath.Join(cleaned, ManagementFileName)
+		return filepath.Join(override, ManagementFileName)
 	}
 
 	dir := StaticDir(configFilePath)
@@ -185,6 +223,25 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 	}
 
 	staticDir = strings.TrimSpace(staticDir)
+
+	if disabled, reason := managementAutoUpdateDisabled(); disabled {
+		log.Debugf("management asset sync skipped: %s", reason)
+		if _, ok := managementStaticOverride(); ok {
+			if candidate := FilePath(""); candidate != "" {
+				if fileInfo, err := os.Stat(candidate); err == nil && !fileInfo.IsDir() {
+					return true
+				}
+			}
+		}
+		if staticDir != "" {
+			candidate := filepath.Join(staticDir, managementAssetName)
+			if fileInfo, err := os.Stat(candidate); err == nil && !fileInfo.IsDir() {
+				return true
+			}
+		}
+		return false
+	}
+
 	if staticDir == "" {
 		log.Debug("management asset sync skipped: empty static directory")
 		return false

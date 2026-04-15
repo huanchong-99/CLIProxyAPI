@@ -1,8 +1,8 @@
 package management
 
 import (
-	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,65 +15,167 @@ type usageExportPayload struct {
 	Usage      usage.StatisticsSnapshot `json:"usage"`
 }
 
-type usageImportPayload struct {
-	Version int                      `json:"version"`
-	Usage   usage.StatisticsSnapshot `json:"usage"`
+type usageFilterPayload struct {
+	StartDate string `json:"start_date"`
+	EndDate   string `json:"end_date"`
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
 }
 
-// GetUsageStatistics returns the in-memory request statistics snapshot.
+type usageImportOptions struct {
+	Mode string `json:"mode"`
+}
+
+type usagePrunePayload struct {
+	BeforeDate string `json:"before_date"`
+	StartDate  string `json:"start_date"`
+	EndDate    string `json:"end_date"`
+}
+
+// GetUsageStatistics returns the expanded usage overview while preserving the legacy snapshot shape.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
+	var overview usage.UsageOverview
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		overview = h.usageStats.Overview(30)
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"usage":           snapshot,
-		"failed_requests": snapshot.FailureCount,
-	})
+	c.JSON(http.StatusOK, overview)
 }
 
-// ExportUsageStatistics returns a complete usage snapshot for backup/migration.
+// GetUsageHistory returns day-bucket usage history for the requested range.
+func (h *Handler) GetUsageHistory(c *gin.Context) {
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+		return
+	}
+	days, err := h.usageStats.History(usage.HistoryQuery{
+		StartDate: c.Query("start"),
+		EndDate:   c.Query("end"),
+		Provider:  c.Query("provider"),
+		Model:     c.Query("model"),
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"days": days})
+}
+
+// GetUsagePersistence returns persistence state and current file metadata.
+func (h *Handler) GetUsagePersistence(c *gin.Context) {
+	meta := usage.PersistenceMetadata{}
+	if h != nil && h.usageStats != nil {
+		meta = h.usageStats.PersistenceStatus()
+	}
+	c.JSON(http.StatusOK, meta)
+}
+
+// ExportUsageStatistics returns a legacy export on GET and the canonical export on POST.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+		return
 	}
-	c.JSON(http.StatusOK, usageExportPayload{
-		Version:    1,
-		ExportedAt: time.Now().UTC(),
-		Usage:      snapshot,
-	})
+	if c.Request.Method == http.MethodGet {
+		snapshot := h.usageStats.Snapshot()
+		c.JSON(http.StatusOK, usageExportPayload{
+			Version:    1,
+			ExportedAt: time.Now().UTC(),
+			Usage:      snapshot,
+		})
+		return
+	}
+
+	query := usage.HistoryQuery{
+		StartDate: c.Query("start"),
+		EndDate:   c.Query("end"),
+		Provider:  c.Query("provider"),
+		Model:     c.Query("model"),
+	}
+	var body usageFilterPayload
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+			return
+		}
+		if strings.TrimSpace(body.StartDate) != "" {
+			query.StartDate = body.StartDate
+		}
+		if strings.TrimSpace(body.EndDate) != "" {
+			query.EndDate = body.EndDate
+		}
+		if strings.TrimSpace(body.Provider) != "" {
+			query.Provider = body.Provider
+		}
+		if strings.TrimSpace(body.Model) != "" {
+			query.Model = body.Model
+		}
+	}
+
+	snapshot, err := h.usageStats.Export(query)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, snapshot)
 }
 
-// ImportUsageStatistics merges a previously exported usage snapshot into memory.
+// ImportUsageStatistics merges or overwrites persisted usage history.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usageStats == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
 		return
 	}
 
-	data, err := c.GetRawData()
+	mode := usage.MergeMode(strings.TrimSpace(c.Query("mode")))
+	if mode == "" {
+		mode = usage.MergeModeMerge
+	}
+
+	if contentType := strings.ToLower(strings.TrimSpace(c.ContentType())); strings.Contains(contentType, "json") && c.Request.ContentLength > 0 {
+		var body usageImportOptions
+		if err := c.ShouldBindQuery(&body); err == nil && strings.TrimSpace(body.Mode) != "" {
+			mode = usage.MergeMode(strings.TrimSpace(body.Mode))
+		}
+	}
+
+	snapshot, err := usage.DecodePersistedSnapshot(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	result, err := h.usageStats.ImportPersisted(snapshot, mode)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
 
-	var payload usageImportPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+// PruneUsageStatistics removes day-bucket history by date range.
+func (h *Handler) PruneUsageStatistics(c *gin.Context) {
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
 		return
 	}
-	if payload.Version != 0 && payload.Version != 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
-		return
+	payload := usagePrunePayload{
+		BeforeDate: c.Query("before_date"),
+		StartDate:  c.Query("start_date"),
+		EndDate:    c.Query("end_date"),
 	}
-
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	snapshot := h.usageStats.Snapshot()
-	c.JSON(http.StatusOK, gin.H{
-		"added":           result.Added,
-		"skipped":         result.Skipped,
-		"total_requests":  snapshot.TotalRequests,
-		"failed_requests": snapshot.FailureCount,
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+			return
+		}
+	}
+	result, err := h.usageStats.Prune(usage.PruneQuery{
+		BeforeDate: payload.BeforeDate,
+		StartDate:  payload.StartDate,
+		EndDate:    payload.EndDate,
 	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }

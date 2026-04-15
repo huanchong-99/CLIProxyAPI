@@ -231,6 +231,40 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testi
 		t.Fatalf("count calls = %v, want only first invalid model", got)
 	}
 }
+
+func TestManagerResolveOpenAICompatUpstreamModelPool_UsesProviderIdentityWhenCompatNameMissing(t *testing.T) {
+	alias := "glm-god"
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "zhipu",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "glm-4.6", Alias: alias},
+				{Name: "glm-4.7", Alias: alias},
+			},
+		}},
+	})
+
+	auth := &Auth{
+		ID:       "zhipu-auth-" + t.Name(),
+		Provider: "zhipu",
+		Attributes: map[string]string{
+			"api_key": "zhipu-key",
+		},
+	}
+
+	got := m.resolveOpenAICompatUpstreamModelPool(auth, alias)
+	want := []string{"glm-4.6", "glm-4.7"}
+	if len(got) != len(want) {
+		t.Fatalf("pool len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pool[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	models := []modelAliasEntry{
 		internalconfig.OpenAICompatibilityModel{Name: "deepseek-v3.1", Alias: "claude-opus-4.66"},

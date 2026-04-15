@@ -25,6 +25,8 @@ type CodexKey = internalconfig.CodexKey
 type ClaudeKey = internalconfig.ClaudeKey
 type VertexCompatKey = internalconfig.VertexCompatKey
 type VertexCompatModel = internalconfig.VertexCompatModel
+type ZhipuKey = internalconfig.ZhipuKey
+type ZhipuModel = internalconfig.ZhipuModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
@@ -33,6 +35,7 @@ type TLS = internalconfig.TLSConfig
 
 const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
+	DefaultZhipuBaseURL          = internalconfig.DefaultZhipuBaseURL
 )
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }

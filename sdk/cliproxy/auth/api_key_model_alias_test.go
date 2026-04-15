@@ -178,3 +178,56 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		})
 	}
 }
+
+func TestLookupAPIKeyUpstreamModel_OpenAICompatProviderIdentityWithoutCompatName(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "zhipu",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "glm-4.6", Alias: "glm-god"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	_, _ = mgr.Register(ctx, &Auth{
+		ID:       "zhipu-auth",
+		Provider: "zhipu",
+		Attributes: map[string]string{
+			"api_key": "zhipu-key",
+		},
+	})
+
+	if resolved := mgr.lookupAPIKeyUpstreamModel("zhipu-auth", "glm-god"); resolved != "glm-4.6" {
+		t.Fatalf("lookupAPIKeyUpstreamModel(%q, %q) = %q, want %q", "zhipu-auth", "glm-god", resolved, "glm-4.6")
+	}
+}
+
+func TestResolveUpstreamModelForOpenAICompatAPIKey_UsesProviderIdentityWhenCompatNameMissing(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "zhipu",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "glm-4.6", Alias: "glm-god"},
+				},
+			},
+		},
+	}
+	auth := &Auth{
+		ID:       "zhipu-auth",
+		Provider: "zhipu",
+		Attributes: map[string]string{
+			"api_key": "zhipu-key",
+		},
+	}
+
+	if resolved := resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, "glm-god"); resolved != "glm-4.6" {
+		t.Fatalf("resolveUpstreamModelForOpenAICompatAPIKey(...) = %q, want %q", resolved, "glm-4.6")
+	}
+}

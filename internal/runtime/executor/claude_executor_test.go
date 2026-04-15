@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -62,6 +63,157 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 	}
 	if got := headers.Get("X-Stainless-Arch"); got != arch {
 		t.Fatalf("X-Stainless-Arch = %q, want %q", got, arch)
+	}
+}
+
+type usageCapturePlugin struct {
+	match func(usage.Record) bool
+	ch    chan usage.Record
+}
+
+func (p *usageCapturePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil {
+		return
+	}
+	if p.match != nil && !p.match(record) {
+		return
+	}
+	select {
+	case p.ch <- record:
+	default:
+	}
+}
+
+func registerUsageCapturePlugin(match func(usage.Record) bool) <-chan usage.Record {
+	ch := make(chan usage.Record, 1)
+	usage.RegisterPlugin(&usageCapturePlugin{
+		match: match,
+		ch:    ch,
+	})
+	return ch
+}
+
+func waitForUsageRecord(t *testing.T, ch <-chan usage.Record) usage.Record {
+	t.Helper()
+
+	select {
+	case record := <-ch:
+		return record
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+		return usage.Record{}
+	}
+}
+
+func TestNewClaudeExecutorWithProvider_UsesConfiguredIdentifier(t *testing.T) {
+	t.Run("configured provider", func(t *testing.T) {
+		executor := NewClaudeExecutorWithProvider(" zhipu ", &config.Config{})
+		if got := executor.Identifier(); got != "zhipu" {
+			t.Fatalf("Identifier() = %q, want %q", got, "zhipu")
+		}
+	})
+
+	t.Run("empty provider falls back to claude", func(t *testing.T) {
+		executor := NewClaudeExecutorWithProvider("   ", &config.Config{})
+		if got := executor.Identifier(); got != "claude" {
+			t.Fatalf("Identifier() = %q, want %q", got, "claude")
+		}
+	})
+}
+
+func TestClaudeExecutor_PrepareRequest_UsesAPIKeyHeaderForBigModelHost(t *testing.T) {
+	executor := NewClaudeExecutorWithProvider("zhipu", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "zhipu",
+		Attributes: map[string]string{
+			"api_key": "glm-test-key",
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://open.bigmodel.cn/api/anthropic/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer stale")
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest() error = %v", err)
+	}
+
+	if got := req.Header.Get("x-api-key"); got != "glm-test-key" {
+		t.Fatalf("x-api-key = %q, want %q", got, "glm-test-key")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for BigModel Anthropic-compatible host", got)
+	}
+}
+
+func TestApplyClaudeHeaders_UsesAPIKeyHeaderForBigModelHost(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "https://open.bigmodel.cn/api/anthropic/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer stale")
+	auth := &cliproxyauth.Auth{
+		Provider: "zhipu",
+		Attributes: map[string]string{
+			"api_key": "glm-test-key",
+		},
+	}
+
+	applyClaudeHeaders(req, auth, "glm-test-key", false, nil, &config.Config{})
+
+	if got := req.Header.Get("x-api-key"); got != "glm-test-key" {
+		t.Fatalf("x-api-key = %q, want %q", got, "glm-test-key")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for BigModel Anthropic-compatible host", got)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_UsageFallbackPublishesRecordWithoutUsageEvents(t *testing.T) {
+	authID := "usage-fallback-" + strings.ReplaceAll(t.Name(), "/", "-")
+	recordCh := registerUsageCapturePlugin(func(record usage.Record) bool {
+		return record.AuthID == authID
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutorWithProvider("zhipu", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "zhipu",
+		Attributes: map[string]string{
+			"api_key":  "glm-test-key",
+			"base_url": server.URL,
+		},
+	}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-4.6",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	record := waitForUsageRecord(t, recordCh)
+	if record.Provider != "zhipu" {
+		t.Fatalf("usage provider = %q, want %q", record.Provider, "zhipu")
+	}
+	if record.Model != "glm-4.6" {
+		t.Fatalf("usage model = %q, want %q", record.Model, "glm-4.6")
+	}
+	if record.Failed {
+		t.Fatal("usage record should be marked successful when the stream completes")
+	}
+	if record.Detail.TotalTokens != 0 {
+		t.Fatalf("usage total_tokens = %d, want 0 when upstream omits usage events", record.Detail.TotalTokens)
 	}
 }
 

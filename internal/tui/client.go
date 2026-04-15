@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	usagepkg "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // Client wraps HTTP calls to the management API.
@@ -104,6 +106,15 @@ func (c *Client) getJSON(path string) (map[string]any, error) {
 	return result, nil
 }
 
+// getTypedJSON fetches a path and unmarshals JSON into the provided destination.
+func (c *Client) getTypedJSON(path string, dest any) error {
+	data, err := c.get(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, dest)
+}
+
 // postJSON sends a JSON body via POST and checks for errors.
 func (c *Client) postJSON(path string, body any) error {
 	jsonBody, err := json.Marshal(body)
@@ -140,9 +151,44 @@ func (c *Client) PutConfigYAML(yamlContent string) error {
 	return err
 }
 
-// GetUsage fetches usage statistics.
-func (c *Client) GetUsage() (map[string]any, error) {
-	return c.getJSON("/v0/management/usage")
+// GetUsage fetches expanded usage statistics.
+func (c *Client) GetUsage() (usagepkg.UsageOverview, error) {
+	var result usagepkg.UsageOverview
+	err := c.getTypedJSON("/v0/management/usage", &result)
+	return result, err
+}
+
+// GetUsageHistory fetches day-bucket usage history for a date range.
+func (c *Client) GetUsageHistory(start, end, provider, model string) ([]usagepkg.DayUsageSnapshot, error) {
+	query := url.Values{}
+	if strings.TrimSpace(start) != "" {
+		query.Set("start", strings.TrimSpace(start))
+	}
+	if strings.TrimSpace(end) != "" {
+		query.Set("end", strings.TrimSpace(end))
+	}
+	if strings.TrimSpace(provider) != "" {
+		query.Set("provider", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(model) != "" {
+		query.Set("model", strings.TrimSpace(model))
+	}
+
+	path := "/v0/management/usage/history"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+
+	var result []usagepkg.DayUsageSnapshot
+	err := c.getTypedJSON(path, &result)
+	return result, err
+}
+
+// GetUsagePersistence fetches usage persistence metadata.
+func (c *Client) GetUsagePersistence() (usagepkg.PersistenceMetadata, error) {
+	var result usagepkg.PersistenceMetadata
+	err := c.getTypedJSON("/v0/management/usage/persistence", &result)
+	return result, err
 }
 
 // GetAuthFiles lists auth credential files.

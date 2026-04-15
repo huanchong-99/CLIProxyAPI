@@ -2392,26 +2392,6 @@
       }
     },
     {
-      "id": "glm-4.6",
-      "object": "model",
-      "created": 1759190400,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "GLM-4.6",
-      "description": "Zhipu GLM 4.6 general model",
-      "thinking": {
-        "levels": [
-          "none",
-          "auto",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
       "id": "kimi-k2",
       "object": "model",
       "created": 1752192000,
@@ -2522,6 +2502,28 @@
       "type": "iflow",
       "display_name": "iFlow-ROME",
       "description": "iFlow Rome 30BA3B model"
+    }
+  ],
+  "zhipu": [
+    {
+      "id": "glm-4.6",
+      "object": "model",
+      "created": 1759190400,
+      "owned_by": "zhipu",
+      "type": "zhipu",
+      "display_name": "GLM-4.6",
+      "description": "Zhipu GLM 4.6 general model",
+      "thinking": {
+        "levels": [
+          "none",
+          "auto",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "kimi": [
