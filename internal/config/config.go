@@ -604,7 +604,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
-	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsEnabled = true
 	cfg.UsagePersistence.Enabled = true
 	cfg.UsagePersistence.Path = DefaultUsagePersistencePath
 	cfg.UsagePersistence.FlushInterval = DefaultUsageFlushInterval
