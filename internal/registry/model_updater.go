@@ -121,6 +121,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
+	// Preserve provider sections that the remote catalog does not publish.
+	// The upstream models.json currently omits zhipu; without this merge the
+	// embedded zhipu definitions would be lost after the first refresh and
+	// /model-definitions/zhipu would start returning 400 unknown channel.
+	preserveMissingSections(parsed, oldData)
+
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
@@ -293,6 +299,19 @@ func mergeProviderNames(existing, incoming []string) []string {
 		merged = append(merged, name)
 	}
 	return merged
+}
+
+// preserveMissingSections copies provider sections from fallback into incoming
+// whenever incoming has an empty slice for that provider. It is intended for
+// merging embedded-only providers (like zhipu) into a freshly fetched remote
+// catalog that omits them.
+func preserveMissingSections(incoming, fallback *staticModelsJSON) {
+	if incoming == nil || fallback == nil {
+		return
+	}
+	if len(incoming.Zhipu) == 0 && len(fallback.Zhipu) > 0 {
+		incoming.Zhipu = cloneModelInfos(fallback.Zhipu)
+	}
 }
 
 func loadModelsFromBytes(data []byte, source string) error {

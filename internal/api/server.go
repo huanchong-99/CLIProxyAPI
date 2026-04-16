@@ -701,7 +701,17 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	html := managementasset.InjectZhipuProvider(string(data))
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

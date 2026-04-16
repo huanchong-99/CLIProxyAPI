@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestManagementHTML_ContainsZhipuProviderEnhancement(t *testing.T) {
+func TestManagementHTML_ZhipuNotInOverlay(t *testing.T) {
 	htmlPath := filepath.Join("..", "management.html")
 
 	content, err := os.ReadFile(htmlPath)
@@ -16,17 +16,26 @@ func TestManagementHTML_ContainsZhipuProviderEnhancement(t *testing.T) {
 	}
 
 	text := string(content)
-	required := []string{
-		`<script id="zhipu-provider-enhancement">`,
-		`provider-zhipu`,
-		`/zhipu-api-key`,
-		`/model-definitions/zhipu`,
+
+	// The local management.html overlay must NOT contain the Zhipu section
+	// (Zhipu is now injected server-side for both local and Docker).
+	forbidden := []string{
+		`<h3>Zhipu</h3>`,
+		`data-role="zhipu-meta"`,
+		`data-role="zhipu-note"`,
+		`zhipuMetaEl`,
+		`zhipuNoteEl`,
+		`zhipu-provider-enhancement`,
 		`Zhipu / GLM`,
+		`Usage Persistence + Zhipu`,
+	}
+	for _, needle := range forbidden {
+		if strings.Contains(text, needle) {
+			t.Fatalf("management.html must NOT contain %q (Zhipu is now injected server-side, not embedded in the HTML file)", needle)
+		}
 	}
 
-	for _, needle := range required {
-		if !strings.Contains(text, needle) {
-			t.Fatalf("expected management.html to contain %q", needle)
-		}
+	if !strings.Contains(text, `Usage Persistence`) {
+		t.Fatal("expected management.html overlay to contain 'Usage Persistence'")
 	}
 }
