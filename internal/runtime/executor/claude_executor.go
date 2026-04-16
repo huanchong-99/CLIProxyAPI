@@ -1566,14 +1566,13 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
 }
 
-// checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
+// checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks.
 //
-//	system[0]: billing header (no cache_control)
-//	system[1]: agent identifier (cache_control ephemeral, scope=org)
-//	system[2]: core intro prompt (cache_control ephemeral, scope=global)
-//	system[3]: system instructions (no cache_control)
-//	system[4]: doing tasks (no cache_control)
-//	system[5]: user system messages moved to first user message
+// The current request shape intentionally keeps system[] limited to the billing
+// header, the public Claude Code agent identifier, and the static Claude Code
+// prompt bundle. Any caller-provided system prompt is forwarded as a
+// <system-reminder> prepended to the first user message when strictMode is
+// disabled; strictMode drops the forwarded system prompt entirely.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 

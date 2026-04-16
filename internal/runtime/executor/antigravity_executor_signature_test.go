@@ -14,11 +14,16 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func testGeminiSignaturePayload() string {
 	payload := append([]byte{0x0A}, bytes.Repeat([]byte{0x56}, 48)...)
 	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func malformedClaudeSignaturePayload() string {
+	return base64.StdEncoding.EncodeToString([]byte{0x12, 0x00})
 }
 
 func testAntigravityAuth(baseURL string) *cliproxyauth.Auth {
@@ -33,14 +38,14 @@ func testAntigravityAuth(baseURL string) *cliproxyauth.Auth {
 	}
 }
 
-func invalidClaudeThinkingPayload() []byte {
+func claudeThinkingPayloadWithSignature(signature string) []byte {
 	return []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
 		"messages": [
 			{
 				"role": "assistant",
 				"content": [
-					{"type": "thinking", "thinking": "bad", "signature": "` + testGeminiSignaturePayload() + `"},
+					{"type": "thinking", "thinking": "bad", "signature": "` + signature + `"},
 					{"type": "text", "text": "hello"}
 				]
 			}
@@ -48,7 +53,7 @@ func invalidClaudeThinkingPayload() []byte {
 	}`)
 }
 
-func TestAntigravityExecutor_StrictBypassRejectsInvalidSignature(t *testing.T) {
+func TestAntigravityExecutor_StrictBypassRejectsMalformedClaudeSignature(t *testing.T) {
 	previousCache := cache.SignatureCacheEnabled()
 	previousStrict := cache.SignatureBypassStrictMode()
 	cache.SetSignatureCacheEnabled(false)
@@ -68,7 +73,7 @@ func TestAntigravityExecutor_StrictBypassRejectsInvalidSignature(t *testing.T) {
 
 	executor := NewAntigravityExecutor(nil)
 	auth := testAntigravityAuth(server.URL)
-	payload := invalidClaudeThinkingPayload()
+	payload := claudeThinkingPayloadWithSignature(malformedClaudeSignaturePayload())
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), OriginalRequest: payload}
 	req := cliproxyexecutor.Request{Model: "claude-sonnet-4-5-thinking", Payload: payload}
 
@@ -117,7 +122,37 @@ func TestAntigravityExecutor_StrictBypassRejectsInvalidSignature(t *testing.T) {
 	}
 
 	if got := hits.Load(); got != 0 {
-		t.Fatalf("expected invalid signature to be rejected before upstream request, got %d upstream hits", got)
+		t.Fatalf("expected malformed Claude signature to be rejected before upstream request, got %d upstream hits", got)
+	}
+}
+
+func TestAntigravityExecutor_StrictBypassStripsForeignThinkingSignature(t *testing.T) {
+	previousCache := cache.SignatureCacheEnabled()
+	previousStrict := cache.SignatureBypassStrictMode()
+	cache.SetSignatureCacheEnabled(false)
+	cache.SetSignatureBypassStrictMode(true)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previousCache)
+		cache.SetSignatureBypassStrictMode(previousStrict)
+	})
+
+	payload := claudeThinkingPayloadWithSignature(testGeminiSignaturePayload())
+	from := sdktranslator.FromString("claude")
+
+	out, err := validateAntigravityRequestSignatures(from, payload)
+	if err != nil {
+		t.Fatalf("foreign thinking signature should be stripped instead of rejected, got: %v", err)
+	}
+
+	content := gjson.GetBytes(out, "messages.0.content").Array()
+	if len(content) != 1 {
+		t.Fatalf("expected stripped content to keep only one block, got %d", len(content))
+	}
+	if got := content[0].Get("type").String(); got != "text" {
+		t.Fatalf("remaining content block type = %q, want text", got)
+	}
+	if got := content[0].Get("text").String(); got != "hello" {
+		t.Fatalf("remaining text = %q, want %q", got, "hello")
 	}
 }
 
@@ -131,7 +166,7 @@ func TestAntigravityExecutor_NonStrictBypassSkipsPrecheck(t *testing.T) {
 		cache.SetSignatureBypassStrictMode(previousStrict)
 	})
 
-	payload := invalidClaudeThinkingPayload()
+	payload := claudeThinkingPayloadWithSignature(malformedClaudeSignaturePayload())
 	from := sdktranslator.FromString("claude")
 
 	_, err := validateAntigravityRequestSignatures(from, payload)
@@ -147,7 +182,7 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 		cache.SetSignatureCacheEnabled(previous)
 	})
 
-	payload := invalidClaudeThinkingPayload()
+	payload := claudeThinkingPayloadWithSignature(malformedClaudeSignaturePayload())
 	from := sdktranslator.FromString("claude")
 
 	_, err := validateAntigravityRequestSignatures(from, payload)
