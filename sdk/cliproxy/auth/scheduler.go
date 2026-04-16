@@ -433,6 +433,8 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
+	details := CooldownDetails{}
+	hasDetails := false
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -448,6 +450,12 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
+		if localDetails, ok := shard.cooldownDetailsLocked(model, triedPredicate(tried), now); ok {
+			if !hasDetails || shouldPreferCooldownDetails(localDetails, details) {
+				details = localDetails
+				hasDetails = true
+			}
+		}
 	}
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -457,7 +465,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownError(model, "", resetIn)
+		return newModelCooldownError(model, "", resetIn, details)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
@@ -856,9 +864,35 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownError(model, providerForError, resetIn)
+		details, _ := m.cooldownDetailsLocked(model, predicate, now)
+		return newModelCooldownError(model, providerForError, resetIn, details)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
+}
+
+func (m *modelScheduler) cooldownDetailsLocked(model string, predicate func(*scheduledAuth) bool, now time.Time) (CooldownDetails, bool) {
+	if m == nil {
+		return CooldownDetails{}, false
+	}
+	var chosen CooldownDetails
+	found := false
+	for _, entry := range m.entries {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		details, ok := cooldownDetailsForAuth(entry.auth, model, now)
+		if !ok {
+			continue
+		}
+		if !found || shouldPreferCooldownDetails(details, chosen) {
+			chosen = details
+			found = true
+		}
+	}
+	return chosen, found
 }
 
 // availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.

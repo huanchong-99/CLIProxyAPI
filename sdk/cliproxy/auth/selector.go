@@ -39,19 +39,32 @@ const (
 )
 
 type modelCooldownError struct {
-	model    string
-	resetIn  time.Duration
-	provider string
+	model         string
+	resetIn       time.Duration
+	provider      string
+	reason        string
+	sourceMessage string
 }
 
-func newModelCooldownError(model, provider string, resetIn time.Duration) *modelCooldownError {
+func newModelCooldownError(model, provider string, resetIn time.Duration, details CooldownDetails) *modelCooldownError {
 	if resetIn < 0 {
 		resetIn = 0
 	}
+	if details.ResetIn <= 0 {
+		details.ResetIn = resetIn
+	}
+	if strings.TrimSpace(details.Model) == "" {
+		details.Model = model
+	}
+	if strings.TrimSpace(provider) != "" {
+		details.Provider = provider
+	}
 	return &modelCooldownError{
-		model:    model,
-		provider: provider,
-		resetIn:  resetIn,
+		model:         model,
+		provider:      provider,
+		resetIn:       resetIn,
+		reason:        strings.TrimSpace(details.Reason),
+		sourceMessage: strings.TrimSpace(details.SourceMessage),
 	}
 }
 
@@ -84,6 +97,12 @@ func (e *modelCooldownError) Error() string {
 	if e.provider != "" {
 		errorBody["provider"] = e.provider
 	}
+	if e.reason != "" {
+		errorBody["reason"] = e.reason
+	}
+	if e.sourceMessage != "" {
+		errorBody["source_message"] = e.sourceMessage
+	}
 	payload := map[string]any{"error": errorBody}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -105,6 +124,19 @@ func (e *modelCooldownError) Headers() http.Header {
 	}
 	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
 	return headers
+}
+
+func (e *modelCooldownError) details() CooldownDetails {
+	if e == nil {
+		return CooldownDetails{}
+	}
+	return CooldownDetails{
+		Reason:        e.reason,
+		SourceMessage: e.sourceMessage,
+		Provider:      e.provider,
+		Model:         e.model,
+		ResetIn:       e.resetIn,
+	}
 }
 
 func authPriority(auth *Auth) int {
@@ -227,7 +259,8 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
+			details, _ := cooldownDetailsForAuths(auths, model, now)
+			return nil, newModelCooldownError(model, providerForError, resetIn, details)
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}

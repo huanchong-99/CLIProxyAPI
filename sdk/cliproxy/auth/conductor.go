@@ -618,7 +618,8 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+			details, _ := cooldownDetailsForAuths(auths, routeModel, now)
+			return nil, newModelCooldownError(routeModel, providerForError, resetIn, details)
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}

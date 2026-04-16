@@ -898,16 +898,8 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
-	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
-		for key, values := range msg.Addon {
-			if len(values) == 0 {
-				continue
-			}
-			c.Writer.Header().Del(key)
-			for _, value := range values {
-				c.Writer.Header().Add(key, value)
-			}
-		}
+	if msg != nil && msg.Addon != nil {
+		WriteErrorResponseHeaders(c.Writer.Header(), msg.Addon, PassthroughHeadersEnabled(h.Cfg))
 	}
 
 	errText := http.StatusText(status)
@@ -940,6 +932,35 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// WriteErrorResponseHeaders applies safe control headers for errors and optionally passthrough headers.
+func WriteErrorResponseHeaders(dst http.Header, addon http.Header, passthroughEnabled bool) {
+	if dst == nil || addon == nil {
+		return
+	}
+	for key, values := range addon {
+		if len(values) == 0 {
+			continue
+		}
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if !passthroughEnabled && !isSafeErrorResponseHeader(canonicalKey) {
+			continue
+		}
+		dst.Del(canonicalKey)
+		for _, value := range values {
+			dst.Add(canonicalKey, value)
+		}
+	}
+}
+
+func isSafeErrorResponseHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Retry-After":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {

@@ -11,15 +11,20 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -78,6 +83,8 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
+	c.Set("claude_model", gjson.GetBytes(rawJSON, "model").String())
+	c.Set("claude_provider", Claude)
 	if !streamResult.Exists() || streamResult.Type == gjson.False {
 		h.handleNonStreamingResponse(c, rawJSON)
 	} else {
@@ -111,10 +118,12 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	c.Set("claude_model", modelName)
+	c.Set("claude_provider", Claude)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.writeClaudeErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -165,11 +174,13 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	c.Set("claude_model", modelName)
+	c.Set("claude_provider", Claude)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.writeClaudeErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -222,6 +233,8 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	}
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	c.Set("claude_model", modelName)
+	c.Set("claude_provider", Claude)
 
 	// Create a cancellable context for the backend client request
 	// This allows proper cleanup and cancellation of ongoing requests
@@ -248,7 +261,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			h.writeClaudeErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -300,7 +313,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			}
 			c.Status(status)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg, true))
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 	})
@@ -316,12 +329,182 @@ type claudeErrorResponse struct {
 	Error claudeErrorDetail `json:"error"`
 }
 
-func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage, includeRetryHint bool) claudeErrorResponse {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	message := claudeErrorMessage(msg, status)
+	if includeRetryHint {
+		message = appendClaudeRetryHint(message, msg)
+	}
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
-			Type:    "api_error",
-			Message: msg.Error.Error(),
+			Type:    claudeErrorType(msg, status),
+			Message: message,
 		},
 	}
+}
+
+func (h *ClaudeCodeAPIHandler) writeClaudeErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	if msg != nil && msg.Addon != nil {
+		handlers.WriteErrorResponseHeaders(c.Writer.Header(), msg.Addon, handlers.PassthroughHeadersEnabled(h.Cfg))
+	}
+
+	payload := h.toClaudeError(msg, false)
+	body, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		body = []byte(`{"type":"error","error":{"type":"api_error","message":"failed to encode Claude error response"}}`)
+	}
+	c.Set("API_RESPONSE", body)
+	if !c.Writer.Written() {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Status(status)
+	_, _ = c.Writer.Write(body)
+	h.logClaudeRateLimitCompatibility(c, msg, payload)
+}
+
+func claudeErrorType(msg *interfaces.ErrorMessage, status int) string {
+	if msg != nil && msg.Error != nil {
+		if details, ok := coreauth.CooldownDetailsFromError(msg.Error); ok && strings.EqualFold(details.Reason, "quota") {
+			return "rate_limit_error"
+		}
+	}
+
+	switch status {
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+		return "invalid_request_error"
+	default:
+		return "api_error"
+	}
+}
+
+func claudeErrorMessage(msg *interfaces.ErrorMessage, status int) string {
+	if msg == nil || msg.Error == nil {
+		return http.StatusText(status)
+	}
+	if details, ok := coreauth.CooldownDetailsFromError(msg.Error); ok {
+		if extracted := extractClaudeErrorMessage(details.SourceMessage); extracted != "" {
+			return extracted
+		}
+	}
+
+	var authErr *coreauth.Error
+	if errors.As(msg.Error, &authErr) && authErr != nil {
+		if extracted := extractClaudeErrorMessage(authErr.Message); extracted != "" {
+			return extracted
+		}
+		if trimmed := strings.TrimSpace(authErr.Message); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	if extracted := extractClaudeErrorMessage(msg.Error.Error()); extracted != "" {
+		return extracted
+	}
+	return http.StatusText(status)
+}
+
+func extractClaudeErrorMessage(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if json.Valid([]byte(raw)) {
+		if message := strings.TrimSpace(gjson.Get(raw, "error.message").String()); message != "" {
+			return message
+		}
+		if message := strings.TrimSpace(gjson.Get(raw, "message").String()); message != "" {
+			return message
+		}
+	}
+	return raw
+}
+
+func appendClaudeRetryHint(message string, msg *interfaces.ErrorMessage) string {
+	retryHint := claudeRetryHint(msg)
+	if retryHint == "" {
+		return message
+	}
+	if strings.Contains(message, retryHint) {
+		return message
+	}
+	if message == "" {
+		return retryHint
+	}
+	return fmt.Sprintf("%s %s", message, retryHint)
+}
+
+func claudeRetryHint(msg *interfaces.ErrorMessage) string {
+	if msg == nil || msg.Addon == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(msg.Addon.Get("Retry-After"))
+	if raw == "" {
+		return ""
+	}
+	if seconds, errParse := strconv.Atoi(raw); errParse == nil {
+		unit := "seconds"
+		if seconds == 1 {
+			unit = "second"
+		}
+		return fmt.Sprintf("Retry after %d %s.", seconds, unit)
+	}
+	return fmt.Sprintf("Retry after %s.", raw)
+}
+
+func (h *ClaudeCodeAPIHandler) logClaudeRateLimitCompatibility(c *gin.Context, msg *interfaces.ErrorMessage, payload claudeErrorResponse) {
+	if payload.Error.Type != "rate_limit_error" {
+		return
+	}
+	source := "upstream_quota"
+	provider := Claude
+	model, _ := c.Get("claude_model")
+	modelName, _ := model.(string)
+	resetSeconds := 0
+
+	if msg != nil && msg.Error != nil {
+		if details, ok := coreauth.CooldownDetailsFromError(msg.Error); ok {
+			source = "local_cooldown"
+			if details.Provider != "" {
+				provider = details.Provider
+			}
+			if details.Model != "" {
+				modelName = details.Model
+			}
+			if details.ResetIn > 0 {
+				resetSeconds = int(details.ResetIn.Round(time.Second) / time.Second)
+			}
+		}
+	}
+	if resetSeconds == 0 {
+		if retryHint := claudeRetryHint(msg); retryHint != "" {
+			if raw := strings.TrimSpace(msg.Addon.Get("Retry-After")); raw != "" {
+				if seconds, errParse := strconv.Atoi(raw); errParse == nil {
+					resetSeconds = seconds
+				}
+			}
+		}
+	}
+
+	log.WithFields(log.Fields{
+		"session_id":    strings.TrimSpace(c.GetHeader("X-Claude-Code-Session-Id")),
+		"model":         modelName,
+		"provider":      provider,
+		"reset_seconds": resetSeconds,
+		"compat_source": source,
+		"error_type":    payload.Error.Type,
+	}).Warn("claude compatible rate-limit error emitted")
 }
