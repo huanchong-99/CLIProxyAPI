@@ -461,5 +461,455 @@ ${n.comment}`:n.comment}this.doc.range[2]=n.offset;break}default:this.errors.pus
         window.setInterval(refreshOverlay, 30000);
       })();
     </script>
+    <script id="zhipu-provider-enhancement">
+      (function () {
+        var MANAGEMENT_BASE = "/v0/management";
+        var ROOT_ID = "provider-zhipu";
+        var STYLE_ID = "zhipu-provider-enhancement-style";
+        var DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic";
+        var state = { configs: [], staticModels: [], loading: false, status: "", error: false };
+
+        function request(path, options) {
+          var requestOptions = options || {};
+          var headers = requestOptions.headers || {};
+          if (!headers["Content-Type"] && requestOptions.body) {
+            headers["Content-Type"] = "application/json";
+          }
+          return fetch(MANAGEMENT_BASE + path, {
+            method: requestOptions.method || "GET",
+            headers: headers,
+            body: requestOptions.body
+          }).then(function (response) {
+            return response.text().then(function (text) {
+              var data = {};
+              if (text) {
+                data = JSON.parse(text);
+              }
+              if (!response.ok) {
+                throw new Error(data && data.error ? data.error : text || response.statusText || "Request failed");
+              }
+              return data;
+            });
+          });
+        }
+
+        function esc(value) {
+          return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+        }
+
+        function mask(value) {
+          var raw = String(value || "").trim();
+          return !raw ? "-" : raw.length <= 10 ? raw : raw.slice(0, 6) + "..." + raw.slice(-4);
+        }
+
+        function normalizeHeaders(value) {
+          var result = {};
+          if (!value || typeof value !== "object" || Array.isArray(value)) {
+            return result;
+          }
+          Object.keys(value).sort().forEach(function (key) {
+            var trimmedKey = String(key || "").trim();
+            if (trimmedKey) {
+              result[trimmedKey] = String(value[key] == null ? "" : value[key]).trim();
+            }
+          });
+          return result;
+        }
+
+        function normalizeModels(value) {
+          return Array.isArray(value) ? value.map(function (item) {
+            var name;
+            var alias;
+            var model;
+            if (!item || typeof item !== "object") {
+              return null;
+            }
+            name = String(item.name || item.id || item.model || "").trim();
+            alias = String(item.alias || item.display_name || item.displayName || "").trim() || name;
+            if (!name) {
+              return null;
+            }
+            model = { name: name, alias: alias };
+            if (item.thinking && typeof item.thinking === "object") {
+              model.thinking = item.thinking;
+            }
+            return model;
+          }).filter(Boolean) : [];
+        }
+
+        function normalizeExcluded(value) {
+          var source = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\r\n,;]+/) : [];
+          var seen = {};
+          var items = [];
+          source.forEach(function (entry) {
+            var trimmed = String(entry || "").trim();
+            var key = trimmed.toLowerCase();
+            if (trimmed && !seen[key]) {
+              seen[key] = true;
+              items.push(trimmed);
+            }
+          });
+          return items;
+        }
+
+        function normalizeConfig(value) {
+          var item = value && typeof value === "object" ? value : {};
+          return {
+            apiKey: String(item["api-key"] || item.apiKey || "").trim(),
+            priority: item.priority == null || item.priority === "" ? "" : String(item.priority).trim(),
+            prefix: String(item.prefix || "").trim(),
+            baseUrl: String(item["base-url"] || item.baseUrl || "").trim(),
+            proxyUrl: String(item["proxy-url"] || item.proxyUrl || "").trim(),
+            headers: normalizeHeaders(item.headers),
+            models: normalizeModels(item.models),
+            excludedModels: normalizeExcluded(item["excluded-models"] || item.excludedModels)
+          };
+        }
+
+        function headersToText(headers) {
+          return Object.keys(headers || {}).sort().map(function (key) { return key + ":" + headers[key]; }).join("; ");
+        }
+
+        function modelsToText(models) {
+          return (models || []).map(function (model) { return model.name + "=>" + (model.alias || model.name); }).join("; ");
+        }
+
+        function parseHeaders(text) {
+          var headers = {};
+          String(text || "").split(/[\r\n;]+/).forEach(function (part) {
+            var trimmed = part.trim();
+            var index = trimmed.indexOf(":");
+            var key;
+            var value;
+            if (index === -1) {
+              return;
+            }
+            key = trimmed.slice(0, index).trim();
+            value = trimmed.slice(index + 1).trim();
+            if (key && value) {
+              headers[key] = value;
+            }
+          });
+          return headers;
+        }
+
+        function parseModels(text, previousModels) {
+          var thinkingByKey = {};
+          var seen = {};
+          var output = [];
+          (previousModels || []).forEach(function (model) {
+            if (model && model.name && model.thinking) {
+              thinkingByKey[model.name + "::" + (model.alias || model.name)] = model.thinking;
+            }
+          });
+          String(text || "").split(/[\r\n;]+/).forEach(function (part) {
+            var trimmed = part.trim();
+            var name;
+            var alias;
+            var key;
+            var model;
+            if (!trimmed) {
+              return;
+            }
+            if (trimmed.indexOf("=>") !== -1) {
+              name = trimmed.split("=>")[0].trim();
+              alias = trimmed.split("=>")[1].trim();
+            } else if (trimmed.indexOf(",") !== -1) {
+              name = trimmed.split(",")[0].trim();
+              alias = trimmed.split(",")[1].trim();
+            } else {
+              name = trimmed;
+              alias = trimmed;
+            }
+            alias = alias || name;
+            key = name.toLowerCase() + "::" + alias.toLowerCase();
+            if (!name || seen[key]) {
+              return;
+            }
+            seen[key] = true;
+            model = { name: name, alias: alias };
+            if (thinkingByKey[name + "::" + alias]) {
+              model.thinking = thinkingByKey[name + "::" + alias];
+            }
+            output.push(model);
+          });
+          return output;
+        }
+
+        function toPayload(config) {
+          var payload = { "api-key": config.apiKey };
+          var headers = normalizeHeaders(config.headers);
+          var models = normalizeModels(config.models);
+          var excluded = normalizeExcluded(config.excludedModels);
+          if (config.priority !== "") {
+            payload.priority = Number(config.priority);
+          }
+          if (config.prefix) {
+            payload.prefix = config.prefix;
+          }
+          if (config.baseUrl) {
+            payload["base-url"] = config.baseUrl;
+          }
+          if (config.proxyUrl) {
+            payload["proxy-url"] = config.proxyUrl;
+          }
+          if (Object.keys(headers).length > 0) {
+            payload.headers = headers;
+          }
+          if (models.length > 0) {
+            payload.models = models;
+          }
+          if (excluded.length > 0) {
+            payload["excluded-models"] = excluded;
+          }
+          return payload;
+        }
+
+        function ensureStyle() {
+          var style = document.getElementById(STYLE_ID);
+          if (style) {
+            return;
+          }
+          style = document.createElement("style");
+          style.id = STYLE_ID;
+          style.textContent = "#" + ROOT_ID + "{margin-top:16px}.zhipu-card{border:1px solid rgba(148,163,184,.35);border-radius:18px;padding:18px;background:rgba(255,255,255,.78);backdrop-filter:blur(10px);box-shadow:0 18px 50px rgba(15,23,42,.08)}.zhipu-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start;margin-bottom:12px}.zhipu-title{margin:0;font-size:20px;font-weight:700}.zhipu-sub{margin:6px 0 0;color:#475569;font-size:13px;line-height:1.5}.zhipu-actions{display:flex;gap:10px;flex-wrap:wrap}.zhipu-btn{border:0;border-radius:999px;padding:10px 14px;font-size:13px;font-weight:600;cursor:pointer}.zhipu-btn.primary{background:#2563eb;color:#fff}.zhipu-btn.secondary{background:rgba(15,23,42,.07);color:#0f172a}.zhipu-btn.danger{background:rgba(220,38,38,.09);color:#b91c1c}.zhipu-btn:disabled{opacity:.55;cursor:not-allowed}.zhipu-status{margin:0 0 12px;padding:11px 13px;border-radius:12px;background:rgba(37,99,235,.08);color:#1d4ed8;font-size:13px;line-height:1.5}.zhipu-status.error{background:rgba(220,38,38,.09);color:#b91c1c}.zhipu-meta{display:flex;gap:8px 12px;flex-wrap:wrap;margin-bottom:12px}.zhipu-pill{display:inline-flex;gap:6px;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(37,99,235,.08);color:#1d4ed8;font-size:12px;font-weight:600}.zhipu-empty{padding:18px;border:1px dashed rgba(148,163,184,.5);border-radius:14px;color:#64748b;text-align:center}.zhipu-list{display:grid;gap:12px}.zhipu-item{border:1px solid rgba(148,163,184,.25);border-radius:16px;padding:16px;background:rgba(248,250,252,.8)}.zhipu-item-head,.zhipu-item-foot{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center}.zhipu-item-head{margin-bottom:12px}.zhipu-item-title{font-size:15px;font-weight:700;color:#0f172a}.zhipu-badges{display:flex;gap:8px;flex-wrap:wrap}.zhipu-badge{display:inline-flex;padding:5px 9px;border-radius:999px;background:rgba(148,163,184,.15);color:#334155;font-size:11px;font-weight:700}.zhipu-badge.warning{background:rgba(245,158,11,.14);color:#b45309}.zhipu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:12px}.zhipu-field{display:flex;flex-direction:column;gap:4px}.zhipu-label{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#64748b}.zhipu-value{font-size:13px;line-height:1.5;color:#0f172a;word-break:break-all}.zhipu-note{font-size:12px;color:#64748b}@media (max-width:768px){.zhipu-card{padding:16px}}html.dark .zhipu-card,[data-theme='dark'] .zhipu-card{background:rgba(15,23,42,.84);border-color:rgba(71,85,105,.55);box-shadow:0 18px 50px rgba(2,6,23,.45)}html.dark .zhipu-sub,html.dark .zhipu-note,[data-theme='dark'] .zhipu-sub,[data-theme='dark'] .zhipu-note{color:#94a3b8}html.dark .zhipu-btn.secondary,[data-theme='dark'] .zhipu-btn.secondary{background:rgba(148,163,184,.14);color:#e2e8f0}html.dark .zhipu-item,[data-theme='dark'] .zhipu-item{background:rgba(15,23,42,.74);border-color:rgba(71,85,105,.55)}html.dark .zhipu-item-title,html.dark .zhipu-value,[data-theme='dark'] .zhipu-item-title,[data-theme='dark'] .zhipu-value{color:#f8fafc}";
+          document.head.appendChild(style);
+        }
+
+        function ensureRoot() {
+          var vertexCard = document.getElementById("provider-vertex");
+          var root = document.getElementById(ROOT_ID);
+          if (!vertexCard || !vertexCard.parentNode) {
+            return null;
+          }
+          if (!root) {
+            root = document.createElement("div");
+            root.id = ROOT_ID;
+            vertexCard.insertAdjacentElement("afterend", root);
+          }
+          if (!root.__zhipuBound) {
+            root.addEventListener("click", onClick);
+            root.__zhipuBound = true;
+          }
+          return root;
+        }
+
+        function render() {
+          var root = ensureRoot();
+          var status = state.status ? '<div class="zhipu-status' + (state.error ? ' error' : '') + '">' + esc(state.status) + "</div>" : "";
+          var body;
+          if (!root) {
+            return;
+          }
+          ensureStyle();
+          if (state.loading && state.configs.length === 0) {
+            body = '<div class="zhipu-empty">Loading Zhipu provider configuration...</div>';
+          } else if (state.configs.length === 0) {
+            body = '<div class="zhipu-empty">No <code>zhipu-api-key</code> entries yet. Add your first GLM key directly from this page.</div>';
+          } else {
+            body = '<div class="zhipu-list">' + state.configs.map(function (config, index) {
+              var disabled = (config.excludedModels || []).length > 0;
+              var badges = ['<span class="zhipu-badge">Models ' + String((config.models || []).length) + "</span>", '<span class="zhipu-badge">Headers ' + String(Object.keys(config.headers || {}).length) + "</span>"];
+              if (disabled) {
+                badges.push('<span class="zhipu-badge warning">Excluded ' + String(config.excludedModels.length) + "</span>");
+              }
+              return ['<article class="zhipu-item">','<div class="zhipu-item-head"><div class="zhipu-item-title">Zhipu Config #' + String(index + 1) + '</div><div class="zhipu-badges">' + badges.join("") + "</div></div>",'<div class="zhipu-grid">','<div class="zhipu-field"><span class="zhipu-label">API Key</span><span class="zhipu-value"><code>' + esc(mask(config.apiKey)) + "</code></span></div>",'<div class="zhipu-field"><span class="zhipu-label">Prefix</span><span class="zhipu-value">' + esc(config.prefix || "-") + "</span></div>",'<div class="zhipu-field"><span class="zhipu-label">Base URL</span><span class="zhipu-value">' + esc(config.baseUrl || DEFAULT_BASE_URL) + "</span></div>",'<div class="zhipu-field"><span class="zhipu-label">Proxy URL</span><span class="zhipu-value">' + esc(config.proxyUrl || "-") + "</span></div>","</div>",'<div class="zhipu-item-foot"><div class="zhipu-note">' + esc((config.models || []).map(function (model) { return model.alias || model.name; }).slice(0, 4).join(", ") || "No explicit model aliases configured.") + '</div><div class="zhipu-actions"><button type="button" class="zhipu-btn secondary" data-action="edit" data-index="' + String(index) + '">Edit</button><button type="button" class="zhipu-btn danger" data-action="delete" data-index="' + String(index) + '">Delete</button></div></div>',"</article>"].join("");
+            }).join("") + "</div>";
+          }
+          root.innerHTML = ['<section class="zhipu-card">','<div class="zhipu-head"><div><h2 class="zhipu-title">Zhipu / GLM</h2><p class="zhipu-sub">First-class provider entry backed by the Anthropic-compatible BigModel endpoint. This fills the missing provider block in the AI Providers page.</p></div><div class="zhipu-actions"><button type="button" class="zhipu-btn secondary" data-action="refresh"' + (state.loading ? " disabled" : "") + '>Refresh</button><button type="button" class="zhipu-btn primary" data-action="add"' + (state.loading ? " disabled" : "") + '>Add Zhipu Config</button></div></div>',status,'<div class="zhipu-meta"><span class="zhipu-pill">Configured Keys <strong>' + String(state.configs.length) + '</strong></span><span class="zhipu-pill">Static Models <strong>' + String(state.staticModels.length) + '</strong></span><span class="zhipu-pill">Default Endpoint <strong>' + esc(DEFAULT_BASE_URL) + "</strong></span></div>",body,"</section>"].join("");
+        }
+
+        function saveAll(configs, successMessage) {
+          state.loading = true;
+          state.status = "Saving Zhipu configuration...";
+          state.error = false;
+          render();
+          return request("/zhipu-api-key", { method: "PUT", body: JSON.stringify(configs.map(toPayload)) }).then(function () {
+            return load(true).then(function () {
+              state.status = successMessage;
+              state.error = false;
+              render();
+            });
+          }).catch(function (error) {
+            state.status = "Failed to save Zhipu config: " + (error && error.message ? error.message : error);
+            state.error = true;
+            render();
+          }).finally(function () {
+            state.loading = false;
+            render();
+          });
+        }
+
+        function editConfig(index) {
+          var current = index >= 0 && state.configs[index] ? state.configs[index] : { apiKey: "", priority: "", prefix: "", baseUrl: "", proxyUrl: "", headers: {}, models: [], excludedModels: [] };
+          var apiKey = window.prompt("Zhipu API Key", current.apiKey || "");
+          var priority;
+          var prefix;
+          var baseUrl;
+          var proxyUrl;
+          var headersText;
+          var modelsText;
+          var excludedText;
+          var next;
+          if (apiKey === null) {
+            return;
+          }
+          apiKey = apiKey.trim();
+          if (!apiKey) {
+            window.alert("API Key is required.");
+            return;
+          }
+          priority = window.prompt("Priority (optional integer)", current.priority || "");
+          if (priority === null) {
+            return;
+          }
+          prefix = window.prompt("Prefix (optional)", current.prefix || "");
+          if (prefix === null) {
+            return;
+          }
+          baseUrl = window.prompt("Base URL (optional, blank uses default)", current.baseUrl || "");
+          if (baseUrl === null) {
+            return;
+          }
+          proxyUrl = window.prompt("Proxy URL (optional)", current.proxyUrl || "");
+          if (proxyUrl === null) {
+            return;
+          }
+          headersText = window.prompt("Custom headers: Header:Value; Header2:Value2", headersToText(current.headers));
+          if (headersText === null) {
+            return;
+          }
+          modelsText = window.prompt("Model mappings: upstream=>alias; upstream2=>alias2", modelsToText(current.models));
+          if (modelsText === null) {
+            return;
+          }
+          excludedText = window.prompt("Excluded models (comma or semicolon separated)", (current.excludedModels || []).join(", "));
+          if (excludedText === null) {
+            return;
+          }
+          next = state.configs.slice();
+          next[index >= 0 ? index : next.length] = {
+            apiKey: apiKey,
+            priority: priority.trim(),
+            prefix: prefix.trim(),
+            baseUrl: baseUrl.trim(),
+            proxyUrl: proxyUrl.trim(),
+            headers: parseHeaders(headersText),
+            models: parseModels(modelsText, current.models),
+            excludedModels: normalizeExcluded(excludedText)
+          };
+          saveAll(next, index >= 0 ? "Zhipu config updated." : "Zhipu config added.");
+        }
+
+        function deleteConfig(index) {
+          var config = state.configs[index];
+          if (!config) {
+            return;
+          }
+          if (!window.confirm("Delete this Zhipu config from zhipu-api-key?")) {
+            return;
+          }
+          state.loading = true;
+          state.status = "Deleting Zhipu configuration...";
+          state.error = false;
+          render();
+          request("/zhipu-api-key?api-key=" + encodeURIComponent(config.apiKey) + "&base-url=" + encodeURIComponent(config.baseUrl || ""), { method: "DELETE" }).then(function () {
+            return load(true).then(function () {
+              state.status = "Zhipu config deleted.";
+              state.error = false;
+              render();
+            });
+          }).catch(function (error) {
+            state.status = "Failed to delete Zhipu config: " + (error && error.message ? error.message : error);
+            state.error = true;
+            render();
+          }).finally(function () {
+            state.loading = false;
+            render();
+          });
+        }
+
+        function onClick(event) {
+          var button = event.target.closest("[data-action]");
+          var index = button && button.hasAttribute("data-index") ? Number(button.getAttribute("data-index")) : -1;
+          if (!button) {
+            return;
+          }
+          if (button.getAttribute("data-action") === "refresh") {
+            load(false);
+            return;
+          }
+          if (button.getAttribute("data-action") === "add") {
+            editConfig(-1);
+            return;
+          }
+          if (button.getAttribute("data-action") === "edit") {
+            editConfig(index);
+            return;
+          }
+          if (button.getAttribute("data-action") === "delete") {
+            deleteConfig(index);
+          }
+        }
+
+        function load(silent) {
+          if (!ensureRoot()) {
+            return Promise.resolve();
+          }
+          state.loading = true;
+          if (!silent) {
+            state.status = "Loading Zhipu provider state...";
+            state.error = false;
+          }
+          render();
+          return Promise.all([
+            request("/zhipu-api-key").catch(function () { return { "zhipu-api-key": [] }; }),
+            request("/model-definitions/zhipu").catch(function () { return { models: [] }; })
+          ]).then(function (results) {
+            state.configs = Array.isArray(results[0] && results[0]["zhipu-api-key"]) ? results[0]["zhipu-api-key"].map(normalizeConfig) : [];
+            state.staticModels = Array.isArray(results[1] && results[1].models) ? results[1].models : [];
+            if (!silent) {
+              state.status = state.configs.length ? "Zhipu provider is ready on the AI Providers page." : "Zhipu provider section is ready. Add your first GLM key to begin.";
+              state.error = false;
+            }
+          }).catch(function (error) {
+            state.status = "Failed to load Zhipu provider: " + (error && error.message ? error.message : error);
+            state.error = true;
+          }).finally(function () {
+            state.loading = false;
+            render();
+          });
+        }
+
+        function mount() {
+          var root = ensureRoot();
+          if (!root) {
+            return;
+          }
+          if (!root.__zhipuRendered) {
+            render();
+            root.__zhipuRendered = true;
+          }
+          if (!state.loading && state.configs.length === 0 && !state.status) {
+            load(true);
+          }
+        }
+
+        ensureStyle();
+        mount();
+        document.addEventListener("DOMContentLoaded", mount);
+        window.setInterval(mount, 1200);
+        window.setInterval(function () {
+          if (ensureRoot()) {
+            load(true);
+          }
+        }, 30000);
+        if (typeof MutationObserver !== "undefined") {
+          new MutationObserver(function () {
+            mount();
+          }).observe(document.documentElement, { childList: true, subtree: true });
+        }
+      })();
+    </script>
   </body>
 </html>
