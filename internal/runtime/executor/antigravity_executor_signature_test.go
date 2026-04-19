@@ -22,8 +22,12 @@ func testGeminiSignaturePayload() string {
 	return base64.StdEncoding.EncodeToString(payload)
 }
 
-func malformedClaudeSignaturePayload() string {
-	return base64.StdEncoding.EncodeToString([]byte{0x12, 0x00})
+// testFakeClaudeSignature returns a base64 string starting with 'E' that passes
+// the lightweight hasValidClaudeSignature check but has invalid protobuf content
+// (first decoded byte 0x12 is correct, but no valid protobuf field 2 follows),
+// so it fails deep validation in strict mode.
+func testFakeClaudeSignature() string {
+	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
 }
 
 func testAntigravityAuth(baseURL string) *cliproxyauth.Auth {
@@ -36,6 +40,21 @@ func testAntigravityAuth(baseURL string) *cliproxyauth.Auth {
 			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
 		},
 	}
+}
+
+func invalidClaudeThinkingPayload() []byte {
+	return []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "bad", "signature": "` + testFakeClaudeSignature() + `"},
+					{"type": "text", "text": "hello"}
+				]
+			}
+		]
+	}`)
 }
 
 func claudeThinkingPayloadWithSignature(signature string) []byte {
@@ -53,7 +72,7 @@ func claudeThinkingPayloadWithSignature(signature string) []byte {
 	}`)
 }
 
-func TestAntigravityExecutor_StrictBypassRejectsMalformedClaudeSignature(t *testing.T) {
+func TestAntigravityExecutor_StrictBypassRejectsInvalidSignature(t *testing.T) {
 	previousCache := cache.SignatureCacheEnabled()
 	previousStrict := cache.SignatureBypassStrictMode()
 	cache.SetSignatureCacheEnabled(false)
@@ -73,7 +92,7 @@ func TestAntigravityExecutor_StrictBypassRejectsMalformedClaudeSignature(t *test
 
 	executor := NewAntigravityExecutor(nil)
 	auth := testAntigravityAuth(server.URL)
-	payload := claudeThinkingPayloadWithSignature(malformedClaudeSignaturePayload())
+	payload := invalidClaudeThinkingPayload()
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), OriginalRequest: payload}
 	req := cliproxyexecutor.Request{Model: "claude-sonnet-4-5-thinking", Payload: payload}
 
@@ -122,7 +141,7 @@ func TestAntigravityExecutor_StrictBypassRejectsMalformedClaudeSignature(t *test
 	}
 
 	if got := hits.Load(); got != 0 {
-		t.Fatalf("expected malformed Claude signature to be rejected before upstream request, got %d upstream hits", got)
+		t.Fatalf("expected invalid signature to be rejected before upstream request, got %d upstream hits", got)
 	}
 }
 
@@ -166,7 +185,7 @@ func TestAntigravityExecutor_NonStrictBypassSkipsPrecheck(t *testing.T) {
 		cache.SetSignatureBypassStrictMode(previousStrict)
 	})
 
-	payload := claudeThinkingPayloadWithSignature(malformedClaudeSignaturePayload())
+	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
 	_, err := validateAntigravityRequestSignatures(from, payload)
@@ -182,7 +201,7 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 		cache.SetSignatureCacheEnabled(previous)
 	})
 
-	payload := claudeThinkingPayloadWithSignature(malformedClaudeSignaturePayload())
+	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
 	_, err := validateAntigravityRequestSignatures(from, payload)

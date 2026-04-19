@@ -17,7 +17,6 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
-	IFlow       []*ModelInfo `json:"iflow"`
 	Zhipu       []*ModelInfo `json:"zhipu"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
@@ -68,11 +67,6 @@ func GetCodexProModels() []*ModelInfo {
 	return cloneModelInfos(getModels().CodexPro)
 }
 
-// GetIFlowModels returns the standard iFlow model definitions.
-func GetIFlowModels() []*ModelInfo {
-	return cloneModelInfos(getModels().IFlow)
-}
-
 // GetZhipuModels returns the standard Zhipu model definitions.
 func GetZhipuModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Zhipu)
@@ -110,7 +104,6 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - gemini-cli
 //   - aistudio
 //   - codex
-//   - iflow
 //   - zhipu
 //   - kimi
 //   - antigravity
@@ -129,8 +122,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
-	case "iflow":
-		return GetIFlowModels()
 	case "zhipu":
 		return GetZhipuModels()
 	case "kimi":
@@ -157,7 +148,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
-		data.IFlow,
 		data.Zhipu,
 		data.Kimi,
 		data.Antigravity,

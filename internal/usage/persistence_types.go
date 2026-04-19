@@ -15,14 +15,14 @@ const (
 
 // UsageTotals captures aggregate request and token counters.
 type UsageTotals struct {
-	Requests         int64 `json:"requests"`
-	SuccessRequests  int64 `json:"success_requests"`
-	FailedRequests   int64 `json:"failed_requests"`
-	InputTokens      int64 `json:"input_tokens"`
-	OutputTokens     int64 `json:"output_tokens"`
-	ReasoningTokens  int64 `json:"reasoning_tokens"`
-	CachedTokens     int64 `json:"cached_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	Requests        int64 `json:"requests"`
+	SuccessRequests int64 `json:"success_requests"`
+	FailedRequests  int64 `json:"failed_requests"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
 }
 
 func (t *UsageTotals) addDetail(tokens TokenStats, failed bool) {
@@ -45,7 +45,7 @@ func (t *UsageTotals) addDetail(tokens TokenStats, failed bool) {
 
 // ProviderUsageSnapshot summarises usage for a provider and its models.
 type ProviderUsageSnapshot struct {
-	Summary UsageTotals          `json:"summary"`
+	Summary UsageTotals            `json:"summary"`
 	Models  map[string]UsageTotals `json:"models,omitempty"`
 }
 
@@ -86,10 +86,10 @@ func (r PersistedRequestRecord) dedupKey() string {
 
 // DayUsageSnapshot stores canonical history for one day bucket.
 type DayUsageSnapshot struct {
-	Date      string                  `json:"date"`
-	Summary   UsageTotals             `json:"summary"`
-	Providers map[string]UsageTotals  `json:"providers,omitempty"`
-	Models    map[string]UsageTotals  `json:"models,omitempty"`
+	Date      string                   `json:"date"`
+	Summary   UsageTotals              `json:"summary"`
+	Providers map[string]UsageTotals   `json:"providers,omitempty"`
+	Models    map[string]UsageTotals   `json:"models,omitempty"`
 	Requests  []PersistedRequestRecord `json:"requests,omitempty"`
 }
 
@@ -107,23 +107,23 @@ type PersistenceMetadata struct {
 
 // PersistedUsageSnapshot is the canonical persisted usage document.
 type PersistedUsageSnapshot struct {
-	Version   int                               `json:"version"`
-	UpdatedAt time.Time                         `json:"updated_at"`
-	Summary   UsageTotals                       `json:"summary"`
-	Providers map[string]ProviderUsageSnapshot  `json:"providers,omitempty"`
-	Models    map[string]UsageTotals            `json:"models,omitempty"`
-	Days      map[string]DayUsageSnapshot       `json:"days,omitempty"`
-	Meta      PersistenceMetadata               `json:"meta"`
+	Version   int                              `json:"version"`
+	UpdatedAt time.Time                        `json:"updated_at"`
+	Summary   UsageTotals                      `json:"summary"`
+	Providers map[string]ProviderUsageSnapshot `json:"providers,omitempty"`
+	Models    map[string]UsageTotals           `json:"models,omitempty"`
+	Days      map[string]DayUsageSnapshot      `json:"days,omitempty"`
+	Meta      PersistenceMetadata              `json:"meta"`
 }
 
 // UsageOverview is the expanded management response while preserving the legacy snapshot.
 type UsageOverview struct {
-	Usage       StatisticsSnapshot             `json:"usage"`
-	FailedRequests int64                       `json:"failed_requests"`
-	Providers   map[string]ProviderUsageSnapshot `json:"providers"`
-	Models      map[string]UsageTotals         `json:"models"`
-	RecentDays  []DayUsageSnapshot             `json:"recent_days"`
-	Persistence PersistenceMetadata            `json:"persistence"`
+	Usage          StatisticsSnapshot               `json:"usage"`
+	FailedRequests int64                            `json:"failed_requests"`
+	Providers      map[string]ProviderUsageSnapshot `json:"providers"`
+	Models         map[string]UsageTotals           `json:"models"`
+	RecentDays     []DayUsageSnapshot               `json:"recent_days"`
+	Persistence    PersistenceMetadata              `json:"persistence"`
 }
 
 // HistoryQuery filters day-bucket history responses.

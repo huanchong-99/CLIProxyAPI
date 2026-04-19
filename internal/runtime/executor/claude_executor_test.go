@@ -22,7 +22,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -63,157 +62,6 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 	}
 	if got := headers.Get("X-Stainless-Arch"); got != arch {
 		t.Fatalf("X-Stainless-Arch = %q, want %q", got, arch)
-	}
-}
-
-type usageCapturePlugin struct {
-	match func(usage.Record) bool
-	ch    chan usage.Record
-}
-
-func (p *usageCapturePlugin) HandleUsage(_ context.Context, record usage.Record) {
-	if p == nil {
-		return
-	}
-	if p.match != nil && !p.match(record) {
-		return
-	}
-	select {
-	case p.ch <- record:
-	default:
-	}
-}
-
-func registerUsageCapturePlugin(match func(usage.Record) bool) <-chan usage.Record {
-	ch := make(chan usage.Record, 1)
-	usage.RegisterPlugin(&usageCapturePlugin{
-		match: match,
-		ch:    ch,
-	})
-	return ch
-}
-
-func waitForUsageRecord(t *testing.T, ch <-chan usage.Record) usage.Record {
-	t.Helper()
-
-	select {
-	case record := <-ch:
-		return record
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for usage record")
-		return usage.Record{}
-	}
-}
-
-func TestNewClaudeExecutorWithProvider_UsesConfiguredIdentifier(t *testing.T) {
-	t.Run("configured provider", func(t *testing.T) {
-		executor := NewClaudeExecutorWithProvider(" zhipu ", &config.Config{})
-		if got := executor.Identifier(); got != "zhipu" {
-			t.Fatalf("Identifier() = %q, want %q", got, "zhipu")
-		}
-	})
-
-	t.Run("empty provider falls back to claude", func(t *testing.T) {
-		executor := NewClaudeExecutorWithProvider("   ", &config.Config{})
-		if got := executor.Identifier(); got != "claude" {
-			t.Fatalf("Identifier() = %q, want %q", got, "claude")
-		}
-	})
-}
-
-func TestClaudeExecutor_PrepareRequest_UsesAPIKeyHeaderForBigModelHost(t *testing.T) {
-	executor := NewClaudeExecutorWithProvider("zhipu", &config.Config{})
-	auth := &cliproxyauth.Auth{
-		Provider: "zhipu",
-		Attributes: map[string]string{
-			"api_key": "glm-test-key",
-		},
-	}
-	req := httptest.NewRequest(http.MethodPost, "https://open.bigmodel.cn/api/anthropic/v1/messages", nil)
-	req.Header.Set("Authorization", "Bearer stale")
-
-	if err := executor.PrepareRequest(req, auth); err != nil {
-		t.Fatalf("PrepareRequest() error = %v", err)
-	}
-
-	if got := req.Header.Get("x-api-key"); got != "glm-test-key" {
-		t.Fatalf("x-api-key = %q, want %q", got, "glm-test-key")
-	}
-	if got := req.Header.Get("Authorization"); got != "" {
-		t.Fatalf("Authorization = %q, want empty for BigModel Anthropic-compatible host", got)
-	}
-}
-
-func TestApplyClaudeHeaders_UsesAPIKeyHeaderForBigModelHost(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "https://open.bigmodel.cn/api/anthropic/v1/messages", nil)
-	req.Header.Set("Authorization", "Bearer stale")
-	auth := &cliproxyauth.Auth{
-		Provider: "zhipu",
-		Attributes: map[string]string{
-			"api_key": "glm-test-key",
-		},
-	}
-
-	applyClaudeHeaders(req, auth, "glm-test-key", false, nil, &config.Config{})
-
-	if got := req.Header.Get("x-api-key"); got != "glm-test-key" {
-		t.Fatalf("x-api-key = %q, want %q", got, "glm-test-key")
-	}
-	if got := req.Header.Get("Authorization"); got != "" {
-		t.Fatalf("Authorization = %q, want empty for BigModel Anthropic-compatible host", got)
-	}
-}
-
-func TestClaudeExecutor_ExecuteStream_UsageFallbackPublishesRecordWithoutUsageEvents(t *testing.T) {
-	authID := "usage-fallback-" + strings.ReplaceAll(t.Name(), "/", "-")
-	recordCh := registerUsageCapturePlugin(func(record usage.Record) bool {
-		return record.AuthID == authID
-	})
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"message_start\"}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
-	}))
-	defer server.Close()
-
-	executor := NewClaudeExecutorWithProvider("zhipu", &config.Config{})
-	auth := &cliproxyauth.Auth{
-		ID:       authID,
-		Provider: "zhipu",
-		Attributes: map[string]string{
-			"api_key":  "glm-test-key",
-			"base_url": server.URL,
-		},
-	}
-
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "glm-4.6",
-		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-	})
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
-	}
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
-		}
-	}
-
-	record := waitForUsageRecord(t, recordCh)
-	if record.Provider != "zhipu" {
-		t.Fatalf("usage provider = %q, want %q", record.Provider, "zhipu")
-	}
-	if record.Model != "glm-4.6" {
-		t.Fatalf("usage model = %q, want %q", record.Model, "glm-4.6")
-	}
-	if record.Failed {
-		t.Fatal("usage record should be marked successful when the stream completes")
-	}
-	if record.Detail.TotalTokens != 0 {
-		t.Fatalf("usage total_tokens = %d, want 0 when upstream omits usage events", record.Detail.TotalTokens)
 	}
 }
 
@@ -1866,7 +1714,7 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	}
 }
 
-func expectedInjectedClaudeStaticPrompt() string {
+func expectedClaudeCodeStaticPrompt() string {
 	return strings.Join([]string{
 		helps.ClaudeCodeIntro,
 		helps.ClaudeCodeSystem,
@@ -1876,8 +1724,21 @@ func expectedInjectedClaudeStaticPrompt() string {
 	}, "\n\n")
 }
 
-func assertInjectedClaudeSystemBlocks(t *testing.T, out []byte) []gjson.Result {
-	t.Helper()
+func expectedForwardedSystemReminder(text string) string {
+	return fmt.Sprintf(`<system-reminder>
+As you answer the user's questions, you can use the following context from the system:
+%s
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>
+`, text)
+}
+
+// Test case 1: String system prompt is preserved by forwarding it to the first user message
+func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
 
 	system := gjson.GetBytes(out, "system")
 	if !system.IsArray() {
@@ -1886,101 +1747,87 @@ func assertInjectedClaudeSystemBlocks(t *testing.T, out []byte) []gjson.Result {
 
 	blocks := system.Array()
 	if len(blocks) != 3 {
-		t.Fatalf("expected 3 injected system blocks, got %d", len(blocks))
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
 
 	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
 		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
 	}
-	if got := blocks[1].Get("text").String(); got != "You are Claude Code, Anthropic's official CLI for Claude." {
-		t.Fatalf("blocks[1] should be Claude Code agent block, got %q", got)
+	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
 	}
-	if got := blocks[2].Get("text").String(); got != expectedInjectedClaudeStaticPrompt() {
-		t.Fatalf("blocks[2] should be the bundled Claude Code static prompt, got %q", got)
+	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
+	}
+	if blocks[2].Get("cache_control").Exists() {
+		t.Fatalf("blocks[2] should not have cache_control, got %s", blocks[2].Get("cache_control").Raw)
 	}
 
-	return blocks
-}
-
-// Test case 1: Non-strict mode forwards caller system text as a first-user system reminder.
-func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
-	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
-
-	out := checkSystemInstructionsWithMode(payload, false)
-
-	assertInjectedClaudeSystemBlocks(t, out)
-
-	content := gjson.GetBytes(out, "messages.0.content").String()
-	if !strings.Contains(content, "<system-reminder>") {
-		t.Fatalf("first user message should include a system reminder, got %q", content)
-	}
-	if !strings.Contains(content, "You are a helpful assistant.") {
-		t.Fatalf("first user message should carry the original system prompt, got %q", content)
-	}
-	if !strings.HasSuffix(content, "hi") {
-		t.Fatalf("first user message should still end with the original content, got %q", content)
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("You are a helpful assistant.")+"hi" {
+		t.Fatalf("messages[0].content should include forwarded system prompt, got %q", got)
 	}
 }
 
-// Test case 2: Strict mode keeps only injected Claude Code blocks and drops caller system text.
+// Test case 2: Strict mode keeps only the injected Claude Code system blocks
 func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, true)
 
-	assertInjectedClaudeSystemBlocks(t, out)
-
-	content := gjson.GetBytes(out, "messages.0.content").String()
-	if strings.Contains(content, "<system-reminder>") {
-		t.Fatalf("strict mode should not forward system-reminder into the first user message, got %q", content)
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("strict mode should produce 3 injected blocks, got %d", len(blocks))
 	}
-	if got := content; got != "hi" {
-		t.Fatalf("strict mode should preserve the original user content, got %q", got)
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("strict mode should not forward system prompt into messages, got %q", got)
 	}
 }
 
-// Test case 3: Empty string system prompt does not produce a spurious reminder.
+// Test case 3: Empty string system prompt does not alter the first user message
 func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
 	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	assertInjectedClaudeSystemBlocks(t, out)
-
-	content := gjson.GetBytes(out, "messages.0.content").String()
-	if strings.Contains(content, "<system-reminder>") {
-		t.Fatalf("empty string system prompt should not create a system reminder, got %q", content)
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("empty string system should still produce 3 injected blocks, got %d", len(blocks))
 	}
-	if got := content; got != "hi" {
-		t.Fatalf("empty string system prompt should preserve original user content, got %q", got)
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("empty string system should not alter messages, got %q", got)
 	}
 }
 
-// Test case 4: Array system prompt is forwarded into the first user message reminder.
+// Test case 4: Array system prompt is forwarded to the first user message
 func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	payload := []byte(`{"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	assertInjectedClaudeSystemBlocks(t, out)
-
-	content := gjson.GetBytes(out, "messages.0.content").String()
-	if !strings.Contains(content, "Be concise.") {
-		t.Fatalf("array system prompt should be forwarded into the system reminder, got %q", content)
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("Be concise.")+"hi" {
+		t.Fatalf("messages[0].content should include forwarded array system prompt, got %q", got)
 	}
 }
 
-// Test case 5: Special characters in string system prompt survive reminder forwarding.
+// Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	assertInjectedClaudeSystemBlocks(t, out)
-
-	content := gjson.GetBytes(out, "messages.0.content").String()
-	if !strings.Contains(content, `Use <xml> tags & "quotes" in output.`) {
-		t.Fatalf("system reminder text mangled, got %q", content)
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder(`Use <xml> tags & "quotes" in output.`)+"hi" {
+		t.Fatalf("forwarded system prompt text mangled, got %q", got)
 	}
 }
 
@@ -2087,10 +1934,12 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 
 	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
 
-	assertInjectedClaudeSystemBlocks(t, out)
-
-	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); strings.Contains(got, "<system-reminder>") {
-		t.Fatalf("strict mode should not prepend a system reminder, got %q", got)
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected strict mode to keep the 3 injected Claude Code system blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("strict mode should not prepend a forwarded system reminder block, got %d content blocks", got)
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {
 		t.Fatalf("expected configured sensitive word obfuscation to apply, got %q", got)

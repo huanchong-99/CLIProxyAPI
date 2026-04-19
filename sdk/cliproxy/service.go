@@ -392,7 +392,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	}
 	// Skip disabled auth entries when (re)binding executors.
 	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
-	// and must not override active provider executors (such as iFlow OAuth accounts).
+	// and must not override active provider executors.
 	if a.Disabled {
 		return
 	}
@@ -402,10 +402,6 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		}
 		if compatProviderKey == "" {
 			compatProviderKey = "openai-compatibility"
-		}
-		if compatProviderKey == "zhipu" {
-			s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider("zhipu", s.cfg))
-			return
 		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
 		return
@@ -426,10 +422,6 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	case "zhipu":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider("zhipu", s.cfg))
-	case "iflow":
-		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	default:
@@ -618,9 +610,13 @@ func (s *Service) Run(ctx context.Context) error {
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
+		var previousSessionAffinity bool
+		var previousSessionAffinityTTL string
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
 		}
 		s.cfgMu.RUnlock()
 
@@ -644,7 +640,15 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		previousStrategy = normalizeStrategy(previousStrategy)
 		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
+
+		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+
+		selectorChanged := previousStrategy != nextStrategy ||
+			previousSessionAffinity != nextSessionAffinity ||
+			previousSessionAffinityTTL != nextSessionAffinityTTL
+
+		if s.coreManager != nil && selectorChanged {
 			var selector coreauth.Selector
 			switch nextStrategy {
 			case "fill-first":
@@ -652,6 +656,20 @@ func (s *Service) Run(ctx context.Context) error {
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}
+
+			if nextSessionAffinity {
+				ttl := time.Hour
+				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
+					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+						ttl = parsed
+					}
+				}
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+					Fallback: selector,
+					TTL:      ttl,
+				})
+			}
+
 			s.coreManager.SetSelector(selector)
 		}
 
@@ -880,17 +898,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 		models = applyExcludedModels(models, excluded)
-	case "zhipu":
-		models = registry.GetStaticModelDefinitionsByChannel("zhipu")
-		if entry := s.resolveConfigZhipuKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildZhipuConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
 	case "codex":
 		codexPlanType := ""
 		if a.Attributes != nil {
@@ -916,9 +923,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
-	case "iflow":
-		models = registry.GetIFlowModels()
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
@@ -1103,40 +1107,6 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	if attrKey != "" {
 		for i := range s.cfg.ClaudeKey {
 			entry := &s.cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigZhipuKey(auth *coreauth.Auth) *config.ZhipuKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.ZhipuAPIKey {
-		entry := &s.cfg.ZhipuAPIKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range s.cfg.ZhipuAPIKey {
-			entry := &s.cfg.ZhipuAPIKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
@@ -1434,13 +1404,6 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
-}
-
-func buildZhipuConfigModels(entry *config.ZhipuKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "zhipu", "zhipu")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
