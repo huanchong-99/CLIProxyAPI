@@ -641,15 +641,20 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	var cache helps.CodexCache
 	if from == "claude" {
 		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
+		var cacheKey string
 		if userIDResult.Exists() {
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
+			cacheKey = fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
+		} else if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+			cacheKey = fmt.Sprintf("%s-apikey-%s", req.Model, apiKey)
+		}
+		if cacheKey != "" {
 			var ok bool
-			if cache, ok = helps.GetCodexCache(key); !ok {
+			if cache, ok = helps.GetCodexCache(cacheKey); !ok {
 				cache = helps.CodexCache{
 					ID:     uuid.New().String(),
 					Expire: time.Now().Add(1 * time.Hour),
 				}
-				helps.SetCodexCache(key, cache)
+				helps.SetCodexCache(cacheKey, cache)
 			}
 		}
 	} else if from == "openai-response" {
