@@ -363,7 +363,7 @@ func (s *RequestStatistics) Prune(query PruneQuery) (PruneResult, error) {
 	if err != nil {
 		return result, err
 	}
-	if before.IsZero() && start.IsZero() && end.IsZero() {
+	if before.IsZero() && start.IsZero() && end.IsZero() && !query.FailedOnly {
 		return result, fmt.Errorf("no prune range specified")
 	}
 	if !before.IsZero() && (!start.IsZero() || !end.IsZero()) {
@@ -385,28 +385,55 @@ func (s *RequestStatistics) Prune(query PruneQuery) (PruneResult, error) {
 	keys := sortedDayKeys(s.days)
 	removedRequests := int64(0)
 	removedDays := 0
+	modified := false
 	for _, dayKey := range keys {
-		remove := false
 		dayTime, err := parseUsageDate(dayKey)
 		if err != nil {
 			log.WithError(err).Warnf("usage: skipping invalid day bucket %q during prune", dayKey)
 			continue
 		}
-		if !before.IsZero() {
-			remove = dayTime.Before(before)
-		} else {
-			remove = (dayTime.Equal(start) || dayTime.After(start)) && (dayTime.Equal(end) || dayTime.Before(end))
+		inRange := before.IsZero() && start.IsZero() && end.IsZero()
+		if !inRange {
+			if !before.IsZero() {
+				inRange = dayTime.Before(before)
+			} else {
+				inRange = (dayTime.Equal(start) || dayTime.After(start)) && (dayTime.Equal(end) || dayTime.Before(end))
+			}
 		}
-		if !remove {
+		if !inRange {
 			continue
 		}
-		if bucket := s.days[dayKey]; bucket != nil {
-			removedRequests += int64(len(bucket.Requests))
+		bucket := s.days[dayKey]
+		if bucket == nil {
+			continue
 		}
-		delete(s.days, dayKey)
-		removedDays++
+		if query.FailedOnly {
+			kept := make([]PersistedRequestRecord, 0, len(bucket.Requests))
+			removedInBucket := int64(0)
+			for _, r := range bucket.Requests {
+				if r.Failed {
+					removedInBucket++
+				} else {
+					kept = append(kept, r)
+				}
+			}
+			if removedInBucket > 0 {
+				removedRequests += removedInBucket
+				modified = true
+				if len(kept) == 0 {
+					delete(s.days, dayKey)
+					removedDays++
+				} else {
+					bucket.Requests = kept
+				}
+			}
+		} else {
+			removedRequests += int64(len(bucket.Requests))
+			delete(s.days, dayKey)
+			removedDays++
+		}
 	}
-	if removedDays > 0 {
+	if removedDays > 0 || modified {
 		s.rebuildLocked()
 	}
 	result.RemovedRequests = removedRequests

@@ -30,6 +30,7 @@ type usagePrunePayload struct {
 	BeforeDate string `json:"before_date"`
 	StartDate  string `json:"start_date"`
 	EndDate    string `json:"end_date"`
+	FailedOnly bool   `json:"failed_only"`
 }
 
 // GetUsageStatistics returns the expanded usage overview while preserving the legacy snapshot shape.
@@ -172,6 +173,7 @@ func (h *Handler) PruneUsageStatistics(c *gin.Context) {
 		BeforeDate: payload.BeforeDate,
 		StartDate:  payload.StartDate,
 		EndDate:    payload.EndDate,
+		FailedOnly: payload.FailedOnly,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

@@ -139,6 +139,7 @@ type PruneQuery struct {
 	BeforeDate string
 	StartDate  string
 	EndDate    string
+	FailedOnly bool
 }
 
 // MergeMode controls persisted import behavior.
