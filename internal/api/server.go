@@ -1045,23 +1045,31 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
+	deepseekAPIKeyCount := len(cfg.DeepseekAPIKey)
 	zhipuAPIKeyCount := len(cfg.ZhipuAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
 		entry := cfg.OpenAICompatibility[i]
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
+	anthropicCompatCount := 0
+	for i := range cfg.AnthropicCompatibility {
+		entry := cfg.AnthropicCompatibility[i]
+		anthropicCompatCount += len(entry.APIKeyEntries)
+	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + zhipuAPIKeyCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d Zhipu keys + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + deepseekAPIKeyCount + zhipuAPIKeyCount + openAICompatCount + anthropicCompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d DeepSeek keys + %d Zhipu keys + %d OpenAI-compat + %d Anthropic-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		vertexAICompatCount,
+		deepseekAPIKeyCount,
 		zhipuAPIKeyCount,
 		openAICompatCount,
+		anthropicCompatCount,
 	)
 
 	s.configureUsagePersistence(oldCfg, cfg)

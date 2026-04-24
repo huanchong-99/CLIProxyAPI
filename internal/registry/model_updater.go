@@ -308,6 +308,9 @@ func preserveMissingSections(incoming, fallback *staticModelsJSON) {
 	if incoming == nil || fallback == nil {
 		return
 	}
+	if len(incoming.Deepseek) == 0 && len(fallback.Deepseek) > 0 {
+		incoming.Deepseek = cloneModelInfos(fallback.Deepseek)
+	}
 	if len(incoming.Zhipu) == 0 && len(fallback.Zhipu) > 0 {
 		incoming.Zhipu = cloneModelInfos(fallback.Zhipu)
 	}

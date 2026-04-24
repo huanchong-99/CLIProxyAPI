@@ -759,8 +759,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Bridge legacy OpenAI-compatibility Zhipu entries into the first-class provider block.
 	cfg.SynthesizeLegacyZhipuKeys()
 
+	// Sanitize DeepSeek keys: trim fields, deduplicate, and normalize defaults.
+	cfg.SanitizeDeepseekKeys()
+
 	// Sanitize Zhipu keys: trim fields, deduplicate, and normalize defaults.
 	cfg.SanitizeZhipuKeys()
+
+	// Sanitize Anthropic-compatibility entries.
+	cfg.SanitizeAnthropicCompatibility()
 
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
