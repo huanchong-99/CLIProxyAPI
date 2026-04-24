@@ -961,6 +961,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "deepseek":
+		models = registry.GetDeepseekModels()
+		models = applyExcludedModels(models, excluded)
 	case "zhipu":
 		models = registry.GetZhipuModels()
 		models = applyExcludedModels(models, excluded)
@@ -1042,6 +1045,43 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
 					} else {
 						// Ensure stale registrations are cleared when model list becomes empty.
+						GlobalModelRegistry().UnregisterClient(a.ID)
+					}
+					return
+				}
+			}
+			for i := range s.cfg.AnthropicCompatibility {
+				compat := &s.cfg.AnthropicCompatibility[i]
+				if strings.EqualFold(compat.Name, compatName) {
+					isCompatAuth = true
+					ms := make([]*ModelInfo, 0, len(compat.Models))
+					for j := range compat.Models {
+						m := compat.Models[j]
+						modelID := m.Alias
+						if modelID == "" {
+							modelID = m.Name
+						}
+						thinking := m.Thinking
+						if thinking == nil {
+							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+						}
+						ms = append(ms, &ModelInfo{
+							ID:          modelID,
+							Object:      "model",
+							Created:     time.Now().Unix(),
+							OwnedBy:     compat.Name,
+							Type:        "anthropic-compatibility",
+							DisplayName: modelID,
+							UserDefined: false,
+							Thinking:    thinking,
+						})
+					}
+					if len(ms) > 0 {
+						if providerKey == "" {
+							providerKey = "anthropic-compatibility"
+						}
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+					} else {
 						GlobalModelRegistry().UnregisterClient(a.ID)
 					}
 					return
