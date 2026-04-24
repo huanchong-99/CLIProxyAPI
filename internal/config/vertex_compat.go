@@ -59,6 +59,32 @@ type VertexCompatModel struct {
 func (m VertexCompatModel) GetName() string  { return m.Name }
 func (m VertexCompatModel) GetAlias() string { return m.Alias }
 
+// DeepseekKey represents the configuration for a DeepSeek API key.
+// The default base URL is the Anthropic-compatible DeepSeek endpoint.
+type DeepseekKey struct {
+	APIKey         string            `yaml:"api-key" json:"api-key"`
+	Priority       int               `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Prefix         string            `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	BaseURL        string            `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	ProxyURL       string            `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	Models         []DeepseekModel   `yaml:"models,omitempty" json:"models,omitempty"`
+	Headers        map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+func (k DeepseekKey) GetAPIKey() string  { return k.APIKey }
+func (k DeepseekKey) GetBaseURL() string { return k.BaseURL }
+
+// DeepseekModel represents a model configuration for DeepSeek compatibility.
+type DeepseekModel struct {
+	Name     string                    `yaml:"name" json:"name"`
+	Alias    string                    `yaml:"alias" json:"alias"`
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+}
+
+func (m DeepseekModel) GetName() string  { return m.Name }
+func (m DeepseekModel) GetAlias() string { return m.Alias }
+
 // ZhipuKey represents the configuration for a Zhipu API key.
 // The default base URL is the Anthropic-compatible Zhipu endpoint.
 type ZhipuKey struct {
@@ -191,4 +217,47 @@ func (cfg *Config) SanitizeZhipuKeys() {
 		out = append(out, entry)
 	}
 	cfg.ZhipuAPIKey = out
+}
+
+// SanitizeDeepseekKeys deduplicates and normalizes DeepSeek credentials.
+func (cfg *Config) SanitizeDeepseekKeys() {
+	if cfg == nil {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(cfg.DeepseekAPIKey))
+	out := cfg.DeepseekAPIKey[:0]
+	for i := range cfg.DeepseekAPIKey {
+		entry := cfg.DeepseekAPIKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.BaseURL == "" {
+			entry.BaseURL = DefaultDeepseekBaseURL
+		}
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+
+		sanitizedModels := make([]DeepseekModel, 0, len(entry.Models))
+		for _, model := range entry.Models {
+			model.Alias = strings.TrimSpace(model.Alias)
+			model.Name = strings.TrimSpace(model.Name)
+			if model.Alias != "" && model.Name != "" {
+				sanitizedModels = append(sanitizedModels, model)
+			}
+		}
+		entry.Models = sanitizedModels
+
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.DeepseekAPIKey = out
 }

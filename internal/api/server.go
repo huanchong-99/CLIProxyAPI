@@ -627,10 +627,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
+		mgmt.GET("/anthropic-compatibility", s.mgmt.GetAnthropicCompat)
+		mgmt.PUT("/anthropic-compatibility", s.mgmt.PutAnthropicCompat)
+		mgmt.PATCH("/anthropic-compatibility", s.mgmt.PatchAnthropicCompat)
+		mgmt.DELETE("/anthropic-compatibility", s.mgmt.DeleteAnthropicCompat)
+
 		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
 		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
+		mgmt.GET("/deepseek-api-key", s.mgmt.GetDeepseekKeys)
+		mgmt.PUT("/deepseek-api-key", s.mgmt.PutDeepseekKeys)
+		mgmt.PATCH("/deepseek-api-key", s.mgmt.PatchDeepseekKey)
+		mgmt.DELETE("/deepseek-api-key", s.mgmt.DeleteDeepseekKey)
 		mgmt.GET("/zhipu-api-key", s.mgmt.GetZhipuKeys)
 		mgmt.PUT("/zhipu-api-key", s.mgmt.PutZhipuKeys)
 		mgmt.PATCH("/zhipu-api-key", s.mgmt.PatchZhipuKey)
@@ -711,6 +720,8 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	}
 
 	html := managementasset.InjectZhipuProvider(string(data))
+	html = managementasset.InjectDeepseekProvider(html)
+	html = managementasset.InjectAnthropicCompatProvider(html)
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)

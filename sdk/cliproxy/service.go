@@ -369,6 +369,24 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 	return "", "", false
 }
 
+func anthropicCompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
+	if a == nil || len(a.Attributes) == 0 {
+		return "", "", false
+	}
+	if strings.TrimSpace(a.Attributes["compat_type"]) != "anthropic" {
+		return "", "", false
+	}
+	providerKey = strings.TrimSpace(a.Attributes["provider_key"])
+	compatName = strings.TrimSpace(a.Attributes["compat_name"])
+	if providerKey == "" {
+		providerKey = compatName
+	}
+	if providerKey == "" {
+		providerKey = "anthropic-compatibility"
+	}
+	return strings.ToLower(providerKey), compatName, true
+}
+
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	s.ensureExecutorsForAuthWithMode(a, false)
 }
@@ -396,12 +414,23 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	if a.Disabled {
 		return
 	}
+	if anthropicProviderKey, _, isAnthropicCompat := anthropicCompatInfoFromAuth(a); isAnthropicCompat {
+		if anthropicProviderKey == "" {
+			anthropicProviderKey = "anthropic-compatibility"
+		}
+		s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider(anthropicProviderKey, s.cfg))
+		return
+	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
 		if compatProviderKey == "" {
 			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
 		if compatProviderKey == "" {
 			compatProviderKey = "openai-compatibility"
+		}
+		if compatProviderKey == "deepseek" {
+			s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider("deepseek", s.cfg))
+			return
 		}
 		if compatProviderKey == "zhipu" {
 			s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider("zhipu", s.cfg))
@@ -426,6 +455,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+	case "deepseek":
+		s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider("deepseek", s.cfg))
 	case "zhipu":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutorWithProvider("zhipu", s.cfg))
 	case "kimi":

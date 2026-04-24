@@ -1694,6 +1694,48 @@
       }
     }
   ],
+  "deepseek": [
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1745452800,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek-V4-Flash",
+      "description": "DeepSeek V4 Flash - fast and efficient model with thinking support",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": ["tools"],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1745452800,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek-V4-Pro",
+      "description": "DeepSeek V4 Pro - flagship model for complex reasoning and coding",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": ["tools"],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
   "zhipu": [
     {
       "id": "glm-5.1",

@@ -233,6 +233,37 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# Anthropic-compatible providers (generic, like openai-compatibility but for Anthropic/Claude protocol)
+# anthropic-compatibility:
+#   - name: "my-claude-proxy"
+#     base-url: "https://my-proxy.example.com/anthropic"
+#     # prefix: "proxy" # optional
+#     api-key-entries:
+#       - api-key: "sk-..."
+#         # proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy
+#     models:
+#       - name: "claude-sonnet-4-20250514"
+#         alias: "claude-sonnet-4-20250514"
+#     # headers:
+#     #   X-Custom-Header: "value"
+
+# DeepSeek API keys
+# deepseek-api-key:
+#   - api-key: "sk-..." # use your DeepSeek API key
+#     # base-url defaults to https://api.deepseek.com/anthropic
+#     # base-url: "https://api.deepseek.com/anthropic"
+#     # prefix: "teamA" # optional: require calls like "teamA/deepseek-v4-pro"
+#     # proxy-url: "socks5://proxy.example.com:1080" # optional
+#     # headers:
+#     #   X-Custom-Header: "custom-value"
+#     # models:
+#     #   - name: "deepseek-v4-pro"
+#     #     alias: "deepseek-v4-pro"
+#     #   - name: "deepseek-v4-flash"
+#     #     alias: "deepseek-v4-flash"
+#     # excluded-models:
+#     #   - "deepseek-chat" # exclude deprecated models
+
 # Zhipu API keys
 # zhipu-api-key:
 #   - api-key: "glm-..." # use the official Zhipu key

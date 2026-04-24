@@ -559,6 +559,139 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing name or index"})
 }
 
+// anthropic-compatibility: []AnthropicCompatibility
+func (h *Handler) GetAnthropicCompat(c *gin.Context) {
+	c.JSON(200, gin.H{"anthropic-compatibility": h.cfg.AnthropicCompatibility})
+}
+func (h *Handler) PutAnthropicCompat(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.AnthropicCompatibility
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.AnthropicCompatibility `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	filtered := make([]config.AnthropicCompatibility, 0, len(arr))
+	for i := range arr {
+		normalizeAnthropicCompatibilityEntry(&arr[i])
+		if strings.TrimSpace(arr[i].BaseURL) != "" {
+			filtered = append(filtered, arr[i])
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.AnthropicCompatibility = filtered
+	h.cfg.SanitizeAnthropicCompatibility()
+	h.persistLocked(c)
+}
+func (h *Handler) PatchAnthropicCompat(c *gin.Context) {
+	type anthropicCompatPatch struct {
+		Name          *string                             `json:"name"`
+		Prefix        *string                             `json:"prefix"`
+		BaseURL       *string                             `json:"base-url"`
+		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers       *map[string]string                  `json:"headers"`
+	}
+	var body struct {
+		Name  *string               `json:"name"`
+		Index *int                   `json:"index"`
+		Value *anthropicCompatPatch  `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.AnthropicCompatibility) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Name != nil {
+		match := strings.TrimSpace(*body.Name)
+		for i := range h.cfg.AnthropicCompatibility {
+			if h.cfg.AnthropicCompatibility[i].Name == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.AnthropicCompatibility[targetIndex]
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		trimmed := strings.TrimSpace(*body.Value.BaseURL)
+		if trimmed == "" {
+			h.cfg.AnthropicCompatibility = append(h.cfg.AnthropicCompatibility[:targetIndex], h.cfg.AnthropicCompatibility[targetIndex+1:]...)
+			h.cfg.SanitizeAnthropicCompatibility()
+			h.persistLocked(c)
+			return
+		}
+		entry.BaseURL = trimmed
+	}
+	if body.Value.APIKeyEntries != nil {
+		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.OpenAICompatibilityModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	normalizeAnthropicCompatibilityEntry(&entry)
+	h.cfg.AnthropicCompatibility[targetIndex] = entry
+	h.cfg.SanitizeAnthropicCompatibility()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteAnthropicCompat(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if name := c.Query("name"); name != "" {
+		out := make([]config.AnthropicCompatibility, 0, len(h.cfg.AnthropicCompatibility))
+		for _, v := range h.cfg.AnthropicCompatibility {
+			if v.Name != name {
+				out = append(out, v)
+			}
+		}
+		h.cfg.AnthropicCompatibility = out
+		h.cfg.SanitizeAnthropicCompatibility()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.AnthropicCompatibility) {
+			h.cfg.AnthropicCompatibility = append(h.cfg.AnthropicCompatibility[:idx], h.cfg.AnthropicCompatibility[idx+1:]...)
+			h.cfg.SanitizeAnthropicCompatibility()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing name or index"})
+}
+
 // vertex-api-key: []VertexCompatKey
 func (h *Handler) GetVertexCompatKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"vertex-api-key": h.vertexCompatKeysWithAuthIndex()})
@@ -753,6 +886,172 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		entries = wrapper.Items
 	}
 	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
+	h.persist(c)
+}
+
+// deepseek-api-key: []DeepseekKey
+func (h *Handler) GetDeepseekKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"deepseek-api-key": h.cfg.DeepseekAPIKey})
+}
+
+func (h *Handler) PutDeepseekKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.DeepseekKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.DeepseekKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	for i := range arr {
+		normalizeDeepseekKey(&arr[i])
+		if arr[i].APIKey == "" {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("deepseek-api-key[%d].api-key is required", i)})
+			return
+		}
+	}
+	h.cfg.DeepseekAPIKey = append([]config.DeepseekKey(nil), arr...)
+	h.cfg.SanitizeDeepseekKeys()
+	h.persist(c)
+}
+
+func (h *Handler) PatchDeepseekKey(c *gin.Context) {
+	type deepseekKeyPatch struct {
+		APIKey         *string                 `json:"api-key"`
+		Priority       *int                    `json:"priority"`
+		Prefix         *string                 `json:"prefix"`
+		BaseURL        *string                 `json:"base-url"`
+		ProxyURL       *string                 `json:"proxy-url"`
+		Headers        *map[string]string      `json:"headers"`
+		Models         *[]config.DeepseekModel `json:"models"`
+		ExcludedModels *[]string               `json:"excluded-models"`
+	}
+	var body struct {
+		Index *int              `json:"index"`
+		Match *string           `json:"match"`
+		Value *deepseekKeyPatch `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	targetIndex := -1
+	switch {
+	case body.Index != nil:
+		if *body.Index < 0 || *body.Index >= len(h.cfg.DeepseekAPIKey) {
+			c.JSON(404, gin.H{"error": "index out of range"})
+			return
+		}
+		targetIndex = *body.Index
+	case body.Match != nil:
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.DeepseekAPIKey {
+			if strings.TrimSpace(h.cfg.DeepseekAPIKey[i].APIKey) == match {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex < 0 {
+			c.JSON(404, gin.H{"error": "entry not found"})
+			return
+		}
+	default:
+		c.JSON(400, gin.H{"error": "index or match is required"})
+		return
+	}
+
+	entry := h.cfg.DeepseekAPIKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = *body.Value.APIKey
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = *body.Value.Prefix
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = *body.Value.BaseURL
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = *body.Value.ProxyURL
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = *body.Value.Headers
+	}
+	if body.Value.Models != nil {
+		entry.Models = *body.Value.Models
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = *body.Value.ExcludedModels
+	}
+
+	normalizeDeepseekKey(&entry)
+	h.cfg.DeepseekAPIKey[targetIndex] = entry
+	h.cfg.SanitizeDeepseekKeys()
+	h.persist(c)
+}
+
+func (h *Handler) DeleteDeepseekKey(c *gin.Context) {
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
+			base := strings.TrimSpace(baseRaw)
+			out := make([]config.DeepseekKey, 0, len(h.cfg.DeepseekAPIKey))
+			for _, v := range h.cfg.DeepseekAPIKey {
+				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+					continue
+				}
+				out = append(out, v)
+			}
+			h.cfg.DeepseekAPIKey = out
+			h.cfg.SanitizeDeepseekKeys()
+			h.persist(c)
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.DeepseekAPIKey {
+			if strings.TrimSpace(h.cfg.DeepseekAPIKey[i].APIKey) == val {
+				matchIndex = i
+				matchCount++
+			}
+		}
+		if matchCount == 0 {
+			c.JSON(404, gin.H{"error": "entry not found"})
+			return
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple entries match api-key; specify base-url as well"})
+			return
+		}
+		h.cfg.DeepseekAPIKey = append(h.cfg.DeepseekAPIKey[:matchIndex], h.cfg.DeepseekAPIKey[matchIndex+1:]...)
+		h.cfg.SanitizeDeepseekKeys()
+		h.persist(c)
+		return
+	}
+
+	indexRaw := strings.TrimSpace(c.Query("index"))
+	if indexRaw == "" {
+		c.JSON(400, gin.H{"error": "api-key or index is required"})
+		return
+	}
+	var index int
+	if _, err := fmt.Sscanf(indexRaw, "%d", &index); err != nil || index < 0 || index >= len(h.cfg.DeepseekAPIKey) {
+		c.JSON(404, gin.H{"error": "index out of range"})
+		return
+	}
+	h.cfg.DeepseekAPIKey = append(h.cfg.DeepseekAPIKey[:index], h.cfg.DeepseekAPIKey[index+1:]...)
+	h.cfg.SanitizeDeepseekKeys()
 	h.persist(c)
 }
 
@@ -1341,6 +1640,51 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 		return
 	}
 	normalized := make([]config.VertexCompatModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" || model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+func normalizeAnthropicCompatibilityEntry(entry *config.AnthropicCompatibility) {
+	if entry == nil {
+		return
+	}
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
+	for i := range entry.APIKeyEntries {
+		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
+		entry.APIKeyEntries[i].APIKey = trimmed
+		if trimmed != "" {
+			existing[trimmed] = struct{}{}
+		}
+	}
+}
+
+func normalizeDeepseekKey(entry *config.DeepseekKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	if entry.BaseURL == "" {
+		entry.BaseURL = config.DefaultDeepseekBaseURL
+	}
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.DeepseekModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)

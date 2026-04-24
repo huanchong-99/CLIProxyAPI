@@ -32,10 +32,14 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// DeepSeek API Keys
+	out = append(out, s.synthesizeDeepseekKeys(ctx)...)
 	// Zhipu API Keys
 	out = append(out, s.synthesizeZhipuKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	// Anthropic-compat
+	out = append(out, s.synthesizeAnthropicCompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
@@ -188,6 +192,53 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 	return out
 }
 
+// synthesizeDeepseekKeys creates Auth entries for first-class DeepSeek API keys.
+func (s *ConfigSynthesizer) synthesizeDeepseekKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.DeepseekAPIKey))
+	for i := range cfg.DeepseekAPIKey {
+		entry := cfg.DeepseekAPIKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		base := normalizedDeepseekBaseURL(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("openai-compatibility:deepseek", key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:deepseek[%s]", token),
+			"api_key":      key,
+			"base_url":     base,
+			"provider_key": "deepseek",
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if hash := computeDeepseekModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		auth := &coreauth.Auth{
+			ID:         id,
+			Provider:   "deepseek",
+			Label:      "deepseek-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(auth, cfg, entry.ExcludedModels, "apikey")
+		out = append(out, auth)
+	}
+	return out
+}
+
 // synthesizeZhipuKeys creates Auth entries for first-class Zhipu API keys.
 // IDs intentionally reuse the historical OpenAI-compatibility zhipu seed so
 // reloads update existing auths in place during the migration window.
@@ -327,6 +378,28 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	return out
 }
 
+func normalizedDeepseekBaseURL(raw string) string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return config.DefaultDeepseekBaseURL
+	}
+	return base
+}
+
+func computeDeepseekModelsHash(models []config.DeepseekModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	compatModels := make([]config.OpenAICompatibilityModel, 0, len(models))
+	for i := range models {
+		compatModels = append(compatModels, config.OpenAICompatibilityModel{
+			Name:  models[i].Name,
+			Alias: models[i].Alias,
+		})
+	}
+	return diff.ComputeOpenAICompatModelsHash(compatModels)
+}
+
 func normalizedZhipuBaseURL(raw string) string {
 	base := strings.TrimSpace(raw)
 	if base == "" {
@@ -359,6 +432,93 @@ func isLegacyZhipuOpenAICompatEntry(entry *config.OpenAICompatibility) bool {
 	}
 	base := strings.ToLower(strings.TrimSpace(entry.BaseURL))
 	return base == strings.ToLower(config.DefaultZhipuBaseURL)
+}
+
+// synthesizeAnthropicCompat creates Auth entries for Anthropic-compatible providers.
+func (s *ConfigSynthesizer) synthesizeAnthropicCompat(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0)
+	for i := range cfg.AnthropicCompatibility {
+		compat := &cfg.AnthropicCompatibility[i]
+		prefix := strings.TrimSpace(compat.Prefix)
+		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
+		if providerName == "" {
+			providerName = "anthropic-compatibility"
+		}
+		base := strings.TrimSpace(compat.BaseURL)
+
+		createdEntries := 0
+		for j := range compat.APIKeyEntries {
+			entry := &compat.APIKeyEntries[j]
+			key := strings.TrimSpace(entry.APIKey)
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			idKind := fmt.Sprintf("anthropic-compatibility:%s", providerName)
+			id, token := idGen.Next(idKind, key, base, proxyURL)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":     base,
+				"compat_name":  compat.Name,
+				"compat_type":  "anthropic",
+				"provider_key": providerName,
+			}
+			if compat.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if key != "" {
+				attrs["api_key"] = key
+			}
+			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(compat.Headers, attrs)
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   providerName,
+				Label:      compat.Name,
+				Prefix:     prefix,
+				Status:     coreauth.StatusActive,
+				ProxyURL:   proxyURL,
+				Attributes: attrs,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			out = append(out, a)
+			createdEntries++
+		}
+		if createdEntries == 0 {
+			idKind := fmt.Sprintf("anthropic-compatibility:%s", providerName)
+			id, token := idGen.Next(idKind, base)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":     base,
+				"compat_name":  compat.Name,
+				"compat_type":  "anthropic",
+				"provider_key": providerName,
+			}
+			if compat.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(compat.Headers, attrs)
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   providerName,
+				Label:      compat.Name,
+				Prefix:     prefix,
+				Status:     coreauth.StatusActive,
+				Attributes: attrs,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // synthesizeVertexCompat creates Auth entries for Vertex-compatible providers.

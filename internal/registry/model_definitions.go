@@ -19,6 +19,7 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
+	Deepseek    []*ModelInfo `json:"deepseek"`
 	Zhipu       []*ModelInfo `json:"zhipu"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
@@ -67,6 +68,11 @@ func GetCodexPlusModels() []*ModelInfo {
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
+}
+
+// GetDeepseekModels returns the standard DeepSeek model definitions.
+func GetDeepseekModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Deepseek)
 }
 
 // GetZhipuModels returns the standard Zhipu model definitions.
@@ -171,6 +177,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - gemini-cli
 //   - aistudio
 //   - codex
+//   - deepseek
 //   - zhipu
 //   - kimi
 //   - antigravity
@@ -189,6 +196,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
+	case "deepseek":
+		return GetDeepseekModels()
 	case "zhipu":
 		return GetZhipuModels()
 	case "kimi":
@@ -215,6 +224,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
+		data.Deepseek,
 		data.Zhipu,
 		data.Kimi,
 		data.Antigravity,

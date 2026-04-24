@@ -22,6 +22,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultDeepseekBaseURL       = "https://api.deepseek.com/anthropic"
 	DefaultZhipuBaseURL          = "https://open.bigmodel.cn/api/anthropic"
 	DefaultUsagePersistencePath  = "data/usage-statistics.json"
 	DefaultUsageFlushInterval    = "15s"
@@ -122,9 +123,17 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// AnthropicCompatibility defines Anthropic API compatibility configurations for external providers.
+	// These use the Claude/Anthropic protocol format and are routed through ClaudeExecutor.
+	AnthropicCompatibility []AnthropicCompatibility `yaml:"anthropic-compatibility" json:"anthropic-compatibility"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// DeepseekAPIKey defines first-class DeepSeek API key configurations.
+	// The default base URL is the Anthropic-compatible DeepSeek endpoint.
+	DeepseekAPIKey []DeepseekKey `yaml:"deepseek-api-key" json:"deepseek-api-key"`
 
 	// ZhipuAPIKey defines first-class Zhipu API key configurations.
 	// The default base URL is the Anthropic-compatible Zhipu endpoint.
@@ -578,6 +587,47 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// AnthropicCompatibility represents the configuration for Anthropic API compatibility
+// with external providers, allowing model aliases to be routed through Anthropic/Claude API format.
+type AnthropicCompatibility struct {
+	Name          string                       `yaml:"name" json:"name"`
+	Priority      int                          `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Prefix        string                       `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	BaseURL       string                       `yaml:"base-url" json:"base-url"`
+	APIKeyEntries []OpenAICompatibilityAPIKey   `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+	Models        []OpenAICompatibilityModel   `yaml:"models" json:"models"`
+	Headers       map[string]string            `yaml:"headers,omitempty" json:"headers,omitempty"`
+}
+
+// SanitizeAnthropicCompatibility removes entries with empty base URLs and trims whitespace.
+func (cfg *Config) SanitizeAnthropicCompatibility() {
+	if cfg == nil {
+		return
+	}
+	out := cfg.AnthropicCompatibility[:0]
+	for i := range cfg.AnthropicCompatibility {
+		entry := cfg.AnthropicCompatibility[i]
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.BaseURL == "" {
+			continue
+		}
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.Prefix = strings.TrimSpace(entry.Prefix)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		keys := entry.APIKeyEntries[:0]
+		for _, k := range entry.APIKeyEntries {
+			k.APIKey = strings.TrimSpace(k.APIKey)
+			k.ProxyURL = strings.TrimSpace(k.ProxyURL)
+			if k.APIKey != "" {
+				keys = append(keys, k)
+			}
+		}
+		entry.APIKeyEntries = keys
+		out = append(out, entry)
+	}
+	cfg.AnthropicCompatibility = out
+}
 
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
